@@ -13,6 +13,7 @@ categories = ["command-line-utilities"]
 clap = { version = "4", features = ["derive"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+toml = "0.8"
 
 # Linux, macOS, and the BSDs all reach the kernel through libc.
 [target.'cfg(unix)'.dependencies]
@@ -20,10 +21,14 @@ libc = "0.2"
 
 # `GetSystemTimes` lives in Win32_System_Threading; `GlobalMemoryStatusEx`,
 # `MEMORYSTATUSEX`, `GetSystemInfo`, and `SYSTEM_INFO` in
-# Win32_System_SystemInformation; `FILETIME` in Win32_Foundation.
+# Win32_System_SystemInformation; `FILETIME` in Win32_Foundation. `LockFileEx`,
+# which makes the daemon a singleton, is in Win32_Storage_FileSystem and takes
+# an `OVERLAPPED` from Win32_System_IO, so it needs both.
 [target.'cfg(windows)'.dependencies]
 windows-sys = { version = "0.61", features = [
     "Win32_Foundation",
+    "Win32_Storage_FileSystem",
+    "Win32_System_IO",
     "Win32_System_Threading",
     "Win32_System_SystemInformation",
 ] }

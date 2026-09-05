@@ -4,6 +4,8 @@
 use std::fmt;
 use std::str::FromStr;
 
+use serde::{Deserialize, Serialize};
+
 use crate::sys::SysError;
 
 /// Eighth-width block characters, from one eighth to seven eighths.
@@ -21,7 +23,8 @@ const RISING_BLOCKS: [&str; 8] = [
 ];
 
 /// How the CPU graph is drawn.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Default, Deserialize, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "lowercase")]
 pub enum GraphStyle {
     /// `[|||||     ]`, the original ASCII bar.
     #[default]

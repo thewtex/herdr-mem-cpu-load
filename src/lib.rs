@@ -9,15 +9,19 @@
 //! * [`herdr`] — the client that talks to a running herdr server.
 //! * [`daemon`] — the sampling loop that ties those last two together.
 //! * [`cli`] — the `tmux-mem-cpu-load` compatible command line.
+//! * [`config`] — the `config.toml` layer the command line is merged over.
+//! * [`watch`] — the live status line the herdr popup pane runs.
 //!
 //! The `herdr-mem-cpu-load` binary is a thin wrapper over these: without
 //! `--daemon` it prints one status line and exits, with `--daemon` it runs the
 //! loop in [`daemon::run`].
 
 pub mod cli;
+pub mod config;
 pub mod daemon;
 pub mod herdr;
 pub mod metrics;
 pub mod render;
 pub mod sys;
 pub mod tokens;
+pub mod watch;

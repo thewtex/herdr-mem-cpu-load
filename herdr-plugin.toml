@@ -23,3 +23,39 @@ platforms = ["linux", "macos"]
 [[startup]]
 command = ["target/release/herdr-mem-cpu-load.exe", "--daemon"]
 platforms = ["windows"]
+
+
+# A popup with a live status line, for when the sidebar rows are not enough:
+#
+#   herdr plugin pane open --plugin thewtex.mem-cpu-load --entrypoint status
+#
+# Unlike `[[startup]]`, pane and action ids must be unique across the whole
+# manifest, so there is no room for a second `.exe` entry gated on Windows.
+# There is no need for one either: herdr resolves a relative program against
+# the plugin root and hands it to the OS, which appends `.exe` when the name
+# has no extension.
+[[panes]]
+id = "status"
+title = "System status"
+description = "A live CPU, memory, and load average status line"
+placement = "popup"
+width = "60%"
+height = 3
+command = ["target/release/herdr-mem-cpu-load", "--watch", "--graph-style", "blocks"]
+
+# Two cheap actions that write into the plugin command log rather than opening
+# anything: one to see what the merged configuration came out as, and one to
+# drop a commented config.toml into the plugin config directory.
+[[actions]]
+id = "show-status"
+title = "Show system status"
+description = "Print the effective configuration into the plugin log"
+contexts = ["workspace"]
+command = ["target/release/herdr-mem-cpu-load", "--print-config"]
+
+[[actions]]
+id = "write-config"
+title = "Write a default config.toml"
+description = "Create a commented config.toml in the plugin config directory"
+contexts = ["workspace"]
+command = ["target/release/herdr-mem-cpu-load", "--write-default-config"]

@@ -10,6 +10,7 @@
 use crate::metrics::load::load_per_core;
 use crate::metrics::memory::MemoryMode;
 use crate::metrics::{CpuMode, Sample};
+use crate::render::colors::{ColorMode, PowerlineMode};
 use crate::render::format::{cpu_text, load_text, mem_text, status_line, RenderOptions};
 use crate::render::graph::{render_bar, sparkline, GraphStyle};
 
@@ -87,6 +88,88 @@ pub fn classify(value: f64, warn: f64, hot: f64) -> Level {
     }
 }
 
+/// How far below a threshold a value has to fall before the level drops back.
+///
+/// Without it a machine hovering on a threshold repaints the sidebar row a
+/// different colour every tick. CPU and memory are percentages, so the margin
+/// is in percentage points; load is per core, where 0.1 is a tenth of a core.
+pub const PERCENT_MARGIN: f64 = 5.0;
+/// The hysteresis margin for the per-core load average.
+pub const LOAD_MARGIN: f64 = 0.1;
+
+/// The next [`Level`] for a metric that is currently at `current`.
+///
+/// Escalation is immediate — the moment a value reaches a threshold the level
+/// rises — but de-escalation waits until the value has fallen `margin` below
+/// the threshold it came from.
+#[must_use]
+pub fn next(current: Level, value: f64, warn: f64, hot: f64, margin: f64) -> Level {
+    if value >= hot || (current == Level::Hot && value >= hot - margin) {
+        Level::Hot
+    } else if value >= warn || (current != Level::Ok && value >= warn - margin) {
+        Level::Warn
+    } else {
+        Level::Ok
+    }
+}
+
+/// The level each metric was last reported at, so [`next`] can apply
+/// hysteresis across ticks.
+///
+/// A fresh tracker starts every metric at [`Level::Ok`], where [`next`] and
+/// [`classify`] agree: nothing can de-escalate out of `Ok`, so the first sample
+/// is plainly classified.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct LevelTracker {
+    cpu: Level,
+    mem: Level,
+    load: Level,
+}
+
+impl LevelTracker {
+    /// A tracker with every metric at [`Level::Ok`].
+    #[must_use]
+    pub const fn new() -> Self {
+        Self {
+            cpu: Level::Ok,
+            mem: Level::Ok,
+            load: Level::Ok,
+        }
+    }
+
+    /// The CPU, memory, and load levels for this sample, in report order.
+    fn advance(
+        &mut self,
+        cpu_percent: f64,
+        mem_percent: f64,
+        load: f64,
+        thresholds: &Thresholds,
+    ) -> [Level; 3] {
+        self.cpu = next(
+            self.cpu,
+            cpu_percent,
+            f64::from(thresholds.cpu_warn),
+            f64::from(thresholds.cpu_hot),
+            PERCENT_MARGIN,
+        );
+        self.mem = next(
+            self.mem,
+            mem_percent,
+            f64::from(thresholds.mem_warn),
+            f64::from(thresholds.mem_hot),
+            PERCENT_MARGIN,
+        );
+        self.load = next(
+            self.load,
+            load,
+            thresholds.load_warn,
+            thresholds.load_hot,
+            LOAD_MARGIN,
+        );
+        [self.cpu, self.mem, self.load]
+    }
+}
+
 /// Everything the token builder needs beyond the sample.
 ///
 /// The defaults are the daemon's, which differ from one-line mode in one place:
@@ -96,6 +179,9 @@ pub fn classify(value: f64, warn: f64, hot: f64) -> Level {
 pub struct TokenOptions {
     pub graph_style: GraphStyle,
     pub graph_lines: usize,
+    /// Cells in the memory bar. Memory moves far less than the CPU does, so a
+    /// sidebar often wants a shorter bar for it.
+    pub mem_graph_lines: usize,
     pub mem_mode: MemoryMode,
     pub cpu_mode: CpuMode,
     pub averages_count: u8,
@@ -107,6 +193,7 @@ impl Default for TokenOptions {
         Self {
             graph_style: GraphStyle::Blocks,
             graph_lines: 10,
+            mem_graph_lines: 10,
             mem_mode: MemoryMode::Default,
             cpu_mode: CpuMode::Default,
             averages_count: 3,
@@ -117,6 +204,9 @@ impl Default for TokenOptions {
 
 impl TokenOptions {
     /// The one-line renderer's options, used for the combined `sys_status`.
+    ///
+    /// Sidebar tokens carry no colour markup of their own: herdr styles a row
+    /// from the config, and a token value may not contain control characters.
     #[must_use]
     pub const fn render_options(&self) -> RenderOptions {
         RenderOptions {
@@ -125,6 +215,10 @@ impl TokenOptions {
             graph_style: self.graph_style,
             graph_lines: self.graph_lines,
             averages_count: self.averages_count,
+            color: ColorMode::None,
+            powerline: PowerlineMode::None,
+            segments_left: None,
+            segments_right: None,
         }
     }
 }
@@ -228,9 +322,16 @@ pub fn truncate_chars(value: &str, max: usize) -> String {
 /// Build every Space sidebar token for one sample.
 ///
 /// `history` is the recent CPU percentages, oldest first, used for the
-/// `cpu_history` sparkline; an empty history clears that token.
+/// `cpu_history` sparkline; an empty history clears that token. `levels`
+/// carries the previous tick's levels so a metric sitting on a threshold does
+/// not flicker between two colours.
 #[must_use]
-pub fn build_tokens(sample: &Sample, history: &[f32], opts: &TokenOptions) -> TokenSet {
+pub fn build_tokens(
+    sample: &Sample,
+    history: &[f32],
+    opts: &TokenOptions,
+    levels: &mut LevelTracker,
+) -> TokenSet {
     let mut tokens = TokenSet::default();
 
     let cpu_status = format!(
@@ -243,7 +344,7 @@ pub fn build_tokens(sample: &Sample, history: &[f32], opts: &TokenOptions) -> To
     let mem_percent = sample.memory.used_percent();
     let mem_status = format!(
         "{} {}",
-        render_bar(opts.graph_style, mem_percent, opts.graph_lines),
+        render_bar(opts.graph_style, mem_percent, opts.mem_graph_lines),
         mem_text(&sample.memory, opts.mem_mode)
     );
     tokens.assign("mem_status", &mem_status);
@@ -273,21 +374,14 @@ pub fn build_tokens(sample: &Sample, history: &[f32], opts: &TokenOptions) -> To
         tokens.assign("cpu_history", &sparkline(history));
     }
 
-    let levels = [
-        classify(
-            f64::from(sample.cpu_percent),
-            f64::from(opts.thresholds.cpu_warn),
-            f64::from(opts.thresholds.cpu_hot),
-        ),
-        classify(
-            f64::from(mem_percent),
-            f64::from(opts.thresholds.mem_warn),
-            f64::from(opts.thresholds.mem_hot),
-        ),
-        classify(load, opts.thresholds.load_warn, opts.thresholds.load_hot),
-    ];
+    let current = levels.advance(
+        f64::from(sample.cpu_percent),
+        f64::from(mem_percent),
+        load,
+        &opts.thresholds,
+    );
     let statuses = [Some(cpu_status), Some(mem_status), load_status];
-    for ((metric, level), status) in METRICS.iter().zip(levels).zip(&statuses) {
+    for ((metric, level), status) in METRICS.iter().zip(current).zip(&statuses) {
         push_level_tokens(&mut tokens, metric, level, status.as_deref());
     }
 
@@ -316,8 +410,8 @@ fn push_level_tokens(tokens: &mut TokenSet, metric: &str, level: Level, status: 
 #[cfg(test)]
 mod tests {
     use super::{
-        build_tokens, classify, is_valid_key, truncate_chars, Level, Thresholds, TokenOptions,
-        MAX_TOKEN_KEYS, MAX_TOKEN_VALUE_CHARS,
+        build_tokens, classify, is_valid_key, next, truncate_chars, Level, LevelTracker,
+        Thresholds, TokenOptions, MAX_TOKEN_KEYS, MAX_TOKEN_VALUE_CHARS, PERCENT_MARGIN,
     };
     use crate::metrics::{LoadAverages, MemoryStatus, Sample};
     use crate::render::graph::sparkline;
@@ -357,17 +451,108 @@ mod tests {
     }
 
     #[test]
+    fn a_level_only_drops_once_the_value_clears_the_margin() {
+        let (warn, hot) = (50.0, 80.0);
+        let mut level = Level::Ok;
+
+        // Escalation is immediate.
+        level = next(level, 79.0, warn, hot, PERCENT_MARGIN);
+        assert_eq!(level, Level::Warn);
+        level = next(level, 81.0, warn, hot, PERCENT_MARGIN);
+        assert_eq!(level, Level::Hot);
+
+        // Oscillating around the threshold keeps it there.
+        for value in [79.0, 81.0, 79.0, 75.0] {
+            level = next(level, value, warn, hot, PERCENT_MARGIN);
+            assert_eq!(level, Level::Hot, "{value} is inside the margin");
+        }
+
+        // Only a value a full margin below lets it fall back.
+        level = next(level, 74.9, warn, hot, PERCENT_MARGIN);
+        assert_eq!(level, Level::Warn);
+        // And the same rule applies on the way from warn to ok.
+        for value in [49.0, 45.0] {
+            level = next(level, value, warn, hot, PERCENT_MARGIN);
+            assert_eq!(level, Level::Warn, "{value} is inside the margin");
+        }
+        level = next(level, 44.9, warn, hot, PERCENT_MARGIN);
+        assert_eq!(level, Level::Ok);
+    }
+
+    #[test]
+    fn the_first_sample_is_plainly_classified() {
+        for value in [0.0, 44.9, 49.0, 50.0, 74.9, 79.0, 80.0, 100.0] {
+            assert_eq!(
+                next(Level::Ok, value, 50.0, 80.0, PERCENT_MARGIN),
+                classify(value, 50.0, 80.0),
+                "a fresh tracker must agree with classify at {value}"
+            );
+        }
+    }
+
+    #[test]
+    fn the_tracker_remembers_each_metric_separately() {
+        let mut levels = LevelTracker::new();
+        // 95% CPU is hot; 36% memory and a load of 2.11 over 8 cores are not.
+        let hot = build_tokens(&sample(95.0), &[], &TokenOptions::default(), &mut levels);
+        assert!(hot.value("cpu_hot").is_some());
+
+        // 79% is below cpu_hot but inside the margin, so the CPU stays hot
+        // while memory and load are untouched.
+        let held = build_tokens(&sample(79.0), &[], &TokenOptions::default(), &mut levels);
+        assert!(held.value("cpu_hot").is_some());
+        assert!(held.value("mem_ok").is_some());
+        assert!(held.value("load_ok").is_some());
+
+        let dropped = build_tokens(&sample(74.0), &[], &TokenOptions::default(), &mut levels);
+        assert!(dropped.value("cpu_hot").is_none());
+        assert!(dropped.value("cpu_warn").is_some());
+    }
+
+    #[test]
+    fn the_memory_bar_can_be_narrower_than_the_cpu_bar() {
+        let opts = TokenOptions {
+            graph_lines: 10,
+            mem_graph_lines: 4,
+            ..TokenOptions::default()
+        };
+        let tokens = build_tokens(&sample(51.2), &[], &opts, &mut LevelTracker::new());
+
+        let mem = tokens.value("mem_status").expect("mem_status is set");
+        let cpu = tokens.value("cpu_status").expect("cpu_status is set");
+        // 36.1% of four cells is one full cell plus a half, inside the frame.
+        assert!(
+            mem.starts_with("\u{2595}\u{2588}\u{258c}  \u{258f} "),
+            "{mem}"
+        );
+        // The CPU bar still gets all ten.
+        assert!(
+            cpu.starts_with(
+                "\u{2595}\u{2588}\u{2588}\u{2588}\u{2588}\u{2588}\u{258f}    \u{258f} "
+            ),
+            "{cpu}"
+        );
+        // The level token mirrors the same string.
+        assert_eq!(tokens.value("mem_ok"), Some(mem));
+    }
+
+    #[test]
     fn build_tokens_sets_every_status_key() {
-        let tokens = build_tokens(&sample(51.2), &[], &TokenOptions::default());
+        let tokens = build_tokens(
+            &sample(51.2),
+            &[],
+            &TokenOptions::default(),
+            &mut LevelTracker::new(),
+        );
 
         assert_eq!(
             tokens.value("cpu_status"),
             Some("\u{2595}\u{2588}\u{2588}\u{2588}\u{2588}\u{2588}\u{258f}    \u{258f} 51.2%")
         );
-        assert!(tokens
-            .value("mem_status")
-            .expect("mem_status is set")
-            .ends_with(" 2885/7987MB"));
+        assert_eq!(
+            tokens.value("mem_status"),
+            Some("\u{2595}\u{2588}\u{2588}\u{2588}\u{258b}      \u{258f} 2885/7987MB")
+        );
         assert_eq!(
             tokens.value("load_status"),
             Some("\u{2595}\u{2588}\u{2588}\u{258b}       \u{258f} 2.11 2.35 2.44")
@@ -381,7 +566,12 @@ mod tests {
     #[test]
     fn exactly_one_level_token_is_set_per_metric() {
         // 95% CPU is hot, 36% memory is ok, load 2.11 over 8 cores is ok.
-        let tokens = build_tokens(&sample(95.0), &[], &TokenOptions::default());
+        let tokens = build_tokens(
+            &sample(95.0),
+            &[],
+            &TokenOptions::default(),
+            &mut LevelTracker::new(),
+        );
 
         for (metric, expected) in [("cpu", Level::Hot), ("mem", Level::Ok), ("load", Level::Ok)] {
             let status = tokens
@@ -403,12 +593,22 @@ mod tests {
 
     #[test]
     fn history_drives_the_sparkline_token() {
-        let empty = build_tokens(&sample(51.2), &[], &TokenOptions::default());
+        let empty = build_tokens(
+            &sample(51.2),
+            &[],
+            &TokenOptions::default(),
+            &mut LevelTracker::new(),
+        );
         assert_eq!(empty.value("cpu_history"), None);
         assert!(empty.clears("cpu_history"));
 
         let history = [0.0, 50.0, 100.0];
-        let filled = build_tokens(&sample(51.2), &history, &TokenOptions::default());
+        let filled = build_tokens(
+            &sample(51.2),
+            &history,
+            &TokenOptions::default(),
+            &mut LevelTracker::new(),
+        );
         assert_eq!(
             filled.value("cpu_history"),
             Some(sparkline(&history).as_str())
@@ -422,7 +622,7 @@ mod tests {
             averages_count: 0,
             ..TokenOptions::default()
         };
-        let tokens = build_tokens(&sample(51.2), &[], &opts);
+        let tokens = build_tokens(&sample(51.2), &[], &opts, &mut LevelTracker::new());
 
         assert_eq!(tokens.value("load_status"), None);
         assert!(tokens.clears("load_status"));
@@ -444,7 +644,7 @@ mod tests {
                     averages_count,
                     ..TokenOptions::default()
                 };
-                let tokens = build_tokens(&sample(99.9), &history, &opts);
+                let tokens = build_tokens(&sample(99.9), &history, &opts, &mut LevelTracker::new());
 
                 tokens.validate().expect("report is within herdr's limits");
                 assert!(

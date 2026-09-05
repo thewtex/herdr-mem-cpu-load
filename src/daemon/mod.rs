@@ -5,6 +5,10 @@
 //! into a capped command log, so a process that printed a line every two
 //! seconds would fill it within the hour. Nothing is written to stdout at all;
 //! diagnostics go to a log file when one is configured.
+//!
+//! Only one daemon runs at a time; see [`lock`].
+
+pub mod lock;
 
 use std::collections::VecDeque;
 use std::fs::OpenOptions;
@@ -18,7 +22,7 @@ use crate::metrics::load_emulator::LoadEmulator;
 use crate::metrics::{self, cpu::CpuSampler};
 use crate::render::format::status_line;
 use crate::sys;
-use crate::tokens::{build_tokens, TokenOptions, TokenSet};
+use crate::tokens::{build_tokens, LevelTracker, TokenOptions, TokenSet};
 
 /// How long the daemon runs before giving up on a herdr that never answers.
 pub const DEFAULT_MAX_FAILURES: u32 = 5;
@@ -213,7 +217,7 @@ impl Logger {
 /// Each platform gets exactly the variant it can use, so the Linux and macOS
 /// code path stays a no-op the optimiser deletes.
 #[derive(Clone, Debug)]
-enum LoadSource {
+pub enum LoadSource {
     /// The kernel keeps the averages; there is nothing to feed.
     #[cfg(not(windows))]
     Native,
@@ -224,7 +228,8 @@ enum LoadSource {
 
 impl LoadSource {
     /// The source this platform needs.
-    fn detect() -> Self {
+    #[must_use]
+    pub fn detect() -> Self {
         #[cfg(windows)]
         {
             Self::Emulated(LoadEmulator::new())
@@ -237,7 +242,7 @@ impl LoadSource {
 
     /// Fold this tick's reading in, before anything reads the load averages
     /// back out.
-    fn update(&mut self, busy_cores: f64, dt: Duration) {
+    pub fn update(&mut self, busy_cores: f64, dt: Duration) {
         match self {
             #[cfg(not(windows))]
             Self::Native => {
@@ -270,6 +275,9 @@ struct Daemon<'a> {
     /// time rather than the nominal interval.
     last_load_update: Option<Instant>,
     seq: SeqGenerator<fn() -> u64>,
+    /// The level each metric was last reported at, so a metric sitting on a
+    /// threshold does not repaint its sidebar row every tick.
+    levels: LevelTracker,
     failures: u32,
 }
 
@@ -284,6 +292,7 @@ impl<'a> Daemon<'a> {
             load: LoadSource::detect(),
             last_load_update: None,
             seq: SeqGenerator::default(),
+            levels: LevelTracker::new(),
             failures: 0,
         }
     }
@@ -316,7 +325,12 @@ impl<'a> Daemon<'a> {
             }
         };
         self.history.push(sample.cpu_percent);
-        let tokens = build_tokens(&sample, &self.history.snapshot(), &self.options.tokens);
+        let tokens = build_tokens(
+            &sample,
+            &self.history.snapshot(),
+            &self.options.tokens,
+            &mut self.levels,
+        );
 
         let workspaces = match self.cli.list_workspaces() {
             Ok(workspaces) => {
@@ -390,9 +404,32 @@ impl<'a> Daemon<'a> {
 ///
 /// Returns once the server is gone: either its socket vanished or
 /// `workspace list` failed `max_failures` times in a row. Both are ordinary
-/// shutdowns, not errors.
+/// shutdowns, not errors — and so is finding another daemon already running,
+/// which happens every time herdr hands off to a new server and re-runs the
+/// `[[startup]]` hooks.
 pub fn run(options: &DaemonOptions) {
     let mut daemon = Daemon::new(options);
+
+    let path = lock::lock_path();
+    let _lock = match lock::DaemonLock::acquire(&path) {
+        Ok(Some(lock)) => Some(lock),
+        Ok(None) => {
+            daemon
+                .logger
+                .log("another herdr-mem-cpu-load daemon is already running");
+            return;
+        }
+        // A state directory that cannot be written is worth saying out loud,
+        // but it is no reason to refuse to sample.
+        Err(error) => {
+            daemon.logger.log(&format!(
+                "could not take the singleton lock at {}: {error}; starting anyway",
+                path.display()
+            ));
+            None
+        }
+    };
+
     daemon.logger.log(&format!(
         "herdr-mem-cpu-load {} started: interval {} ms, ttl {} ms, source {}, history {}",
         env!("CARGO_PKG_VERSION"),

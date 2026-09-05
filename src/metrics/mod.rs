@@ -5,6 +5,8 @@ pub mod load;
 pub mod load_emulator;
 pub mod memory;
 
+use serde::{Deserialize, Serialize};
+
 use crate::sys::{self, SysError};
 pub use crate::sys::{LoadAverages, MemoryStatus};
 
@@ -12,7 +14,8 @@ pub use crate::sys::{LoadAverages, MemoryStatus};
 ///
 /// * `Default` caps at 100% across all processors, e.g. `51.2%`.
 /// * `Threads` scales by the thread count, e.g. `410%` on 8 threads.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Default, Deserialize, PartialEq, Eq, Serialize)]
+#[serde(try_from = "u8", into = "u8")]
 pub enum CpuMode {
     #[default]
     Default = 0,
@@ -30,6 +33,12 @@ impl TryFrom<u8> for CpuMode {
                 "invalid cpu mode `{other}`, expected 0 or 1"
             ))),
         }
+    }
+}
+
+impl From<CpuMode> for u8 {
+    fn from(mode: CpuMode) -> Self {
+        mode as Self
     }
 }
 
@@ -86,6 +95,7 @@ mod tests {
         assert_eq!(CpuMode::try_from(1), Ok(CpuMode::Threads));
         assert!(CpuMode::try_from(2).is_err());
         assert_eq!(CpuMode::default(), CpuMode::Default);
+        assert_eq!(u8::from(CpuMode::Threads), 1);
     }
 
     #[test]

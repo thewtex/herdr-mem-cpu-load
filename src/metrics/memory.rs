@@ -1,5 +1,7 @@
 //! Memory metric types.
 
+use serde::{Deserialize, Serialize};
+
 pub use crate::sys::MemoryStatus;
 use crate::sys::SysError;
 
@@ -8,7 +10,8 @@ use crate::sys::SysError;
 /// * `Default` renders `2885/7987MB`
 /// * `Free` renders `4.98GB`
 /// * `UsagePercent` renders `36.12%`
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Default, Deserialize, PartialEq, Eq, Serialize)]
+#[serde(try_from = "u8", into = "u8")]
 pub enum MemoryMode {
     #[default]
     Default = 0,
@@ -31,6 +34,12 @@ impl TryFrom<u8> for MemoryMode {
     }
 }
 
+impl From<MemoryMode> for u8 {
+    fn from(mode: MemoryMode) -> Self {
+        mode as Self
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::MemoryMode;
@@ -42,5 +51,22 @@ mod tests {
         assert_eq!(MemoryMode::try_from(2), Ok(MemoryMode::UsagePercent));
         assert!(MemoryMode::try_from(3).is_err());
         assert_eq!(MemoryMode::default(), MemoryMode::Default);
+        assert_eq!(u8::from(MemoryMode::UsagePercent), 2);
+    }
+
+    #[test]
+    fn memory_mode_is_a_number_in_a_config_file() {
+        #[derive(serde::Deserialize, serde::Serialize)]
+        struct Wrapper {
+            mem_mode: MemoryMode,
+        }
+
+        let parsed: Wrapper = toml::from_str("mem_mode = 1").expect("parses");
+        assert_eq!(parsed.mem_mode, MemoryMode::Free);
+        assert_eq!(
+            toml::to_string(&parsed).expect("serialises").trim(),
+            "mem_mode = 1"
+        );
+        assert!(toml::from_str::<Wrapper>("mem_mode = 9").is_err());
     }
 }

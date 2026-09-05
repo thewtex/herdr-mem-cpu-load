@@ -1,0 +1,78 @@
+# herdr-mem-cpu-load configuration.
+#
+# This file lives in the plugin's herdr config directory:
+#
+#   herdr plugin config-dir thewtex.mem-cpu-load
+#
+# Every key is optional. A key that is commented out keeps the built-in
+# default shown next to it, and a command line flag overrides whatever is
+# written here. The resolution order, highest first, is:
+#
+#   1. explicit command line flags
+#   2. --config <PATH>
+#   3. $HERDR_PLUGIN_CONFIG_DIR/config.toml (this file)
+#   4. the defaults below
+#
+# Run `herdr-mem-cpu-load --print-config` to see what the merge produced.
+# An unknown key is an error naming this file and the line, and a file that
+# fails to parse is reported on stderr and then ignored, so a typo cannot take
+# the sidebar down with it.
+
+# Seconds between samples. Also the window the CPU percentage is measured over.
+# Minimum 1.
+#interval_secs = 1
+
+# How long herdr keeps the reported tokens, in milliseconds. The default is
+# two intervals plus a second of slack, so one slow tick does not blink the
+# sidebar rows out of existence. Daemon mode only.
+#ttl_ms = 3000
+
+# The metadata source the tokens are reported under. Daemon mode only.
+#source = "system-monitor"
+
+# The CPU graph: "classic" ([|||||     ]), "blocks" (unicode eighths), or
+# "vertical" (a single bar character). One-line mode defaults to "classic",
+# --daemon defaults to "blocks".
+#graph_style = "classic"
+
+# Cells in the CPU graph. 0 hides it.
+#graph_lines = 10
+
+# Cells in the memory bar. Defaults to graph_lines. Memory moves far less than
+# the CPU does, so a narrower bar often reads better in the sidebar.
+#mem_graph_lines = 10
+
+# Memory display. 0: used/total, 1: free memory, 2: usage percent.
+#mem_mode = 0
+
+# CPU percentage display. 0: max 100%, 1: max 100% per thread.
+#cpu_mode = 0
+
+# How many load averages to print, 0 to 3.
+#averages_count = 3
+
+# Samples kept for the $cpu_history sparkline. Defaults to graph_lines.
+# Daemon mode only.
+#history = 10
+
+# Log every tick's status line to the daemon log, not just errors.
+# Daemon mode only.
+#verbose = false
+
+# Where each metric stops being comfortable and starts being interesting.
+#
+# The daemon reports $cpu_ok, $cpu_warn, or $cpu_hot (and the same for mem and
+# load) so a sidebar row can change colour as the machine heats up. CPU and
+# memory are percentages; load is the one minute average divided by the CPU
+# count, so 1.0 means the machine is exactly saturated.
+#
+# A level rises the moment a value reaches its threshold and only falls back
+# once the value is five percentage points (a tenth of a core, for load) below
+# it again, so a machine hovering on a threshold does not flicker.
+#[thresholds]
+#cpu_warn = 50.0
+#cpu_hot = 80.0
+#mem_warn = 70.0
+#mem_hot = 90.0
+#load_warn = 0.7
+#load_hot = 1.0

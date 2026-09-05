@@ -1,9 +1,19 @@
 //! Text formatting for the status line, ported from the original's
-//! `cpu_string`, `mem_string`, and `load_string` without the tmux colour
-//! markup (colours are reserved for a later phase).
+//! `cpu_string`, `mem_string`, and `load_string`.
+//!
+//! Without colours the output is byte for byte what the uncoloured original
+//! prints. With `--colors` the tmux markup and powerline separators follow the
+//! same control flow as `common/main.cc`, `common/memory.cc`, and
+//! `common/load.cc`; with `--ansi` the same lookup tables are emitted as SGR
+//! escapes instead.
 
+use crate::metrics::load::load_percent;
 use crate::metrics::memory::{MemoryMode, MemoryStatus};
 use crate::metrics::{CpuMode, LoadAverages, Sample};
+use crate::render::colors::{
+    cpu_color, load_color, mem_color, powerline, powerline_char, ColorMode, PowerlineMode,
+    ANSI_RESET, TMUX_RESET,
+};
 use crate::render::graph::{block_bar, classic_bar, vertical_bar, GraphStyle};
 
 /// Everything the renderer needs to know beyond the sample itself.
@@ -14,6 +24,15 @@ pub struct RenderOptions {
     pub graph_style: GraphStyle,
     pub graph_lines: usize,
     pub averages_count: u8,
+    /// Which colour markup to wrap each segment in.
+    pub color: ColorMode,
+    /// Which powerline separators to blend the tmux markup with.
+    pub powerline: PowerlineMode,
+    /// The tmux colour of whatever sits to the left of the status, for
+    /// seamless powerline blending (`-l`).
+    pub segments_left: Option<u16>,
+    /// The tmux colour of whatever sits to the right of the status (`-r`).
+    pub segments_right: Option<u16>,
 }
 
 impl Default for RenderOptions {
@@ -24,6 +43,10 @@ impl Default for RenderOptions {
             graph_style: GraphStyle::Classic,
             graph_lines: 10,
             averages_count: 3,
+            color: ColorMode::None,
+            powerline: PowerlineMode::None,
+            segments_left: None,
+            segments_right: None,
         }
     }
 }
@@ -119,20 +142,143 @@ pub fn load_text(load: &LoadAverages, averages_count: u8) -> String {
     format!(" {}", rendered.join(" "))
 }
 
+/// The memory segment, coloured the way `mem_string` colours it.
+#[must_use]
+pub fn mem_segment(status: &MemoryStatus, opts: &RenderOptions) -> String {
+    let text = mem_text(status, opts.mem_mode);
+    let percent = status.used_percent() as u32;
+
+    match opts.color {
+        ColorMode::None => text,
+        ColorMode::Ansi => format!("{}{text}{ANSI_RESET}", mem_color(percent).ansi()),
+        ColorMode::Tmux => {
+            let color = mem_color(percent).tmux();
+            // The memory segment starts the line, so it is the one that has to
+            // blend with whatever tmux drew to its left.
+            let mut out = match (opts.powerline, opts.segments_left) {
+                (PowerlineMode::Right, Some(left)) => {
+                    format!(
+                        "{} ",
+                        powerline_char(&color, left, PowerlineMode::Right, false)
+                    )
+                }
+                (PowerlineMode::Right, None) => format!(
+                    "#[bg=default]{} ",
+                    powerline(&color, PowerlineMode::Right, false)
+                ),
+                (PowerlineMode::Left, Some(left)) => {
+                    format!(
+                        "{} ",
+                        powerline_char(&color, left, PowerlineMode::Left, false)
+                    )
+                }
+                // There is no way to invert the default background, so the
+                // left-pointing separator is skipped at the start of the line.
+                (PowerlineMode::Left, None) => {
+                    format!("{} ", powerline(&color, PowerlineMode::None, false))
+                }
+                (PowerlineMode::None, _) => powerline(&color, PowerlineMode::None, false),
+            };
+            out.push_str(&text);
+            out.push_str(&tmux_segment_end(&color, opts.powerline));
+            out
+        }
+    }
+}
+
+/// The CPU segment, coloured the way `cpu_string` colours it.
+#[must_use]
+pub fn cpu_segment(sample: &Sample, opts: &RenderOptions) -> String {
+    let text = cpu_line(
+        sample.cpu_percent,
+        opts.cpu_mode,
+        sample.cpu_count,
+        opts.graph_style,
+        opts.graph_lines,
+    );
+    // The lookup index is the raw percentage, not the one scaled by the thread
+    // count that gets printed.
+    let percent = truncate_percent(sample.cpu_percent);
+
+    match opts.color {
+        ColorMode::None => text,
+        ColorMode::Ansi => format!("{}{text}{ANSI_RESET}", cpu_color(percent).ansi()),
+        ColorMode::Tmux => {
+            let color = cpu_color(percent).tmux();
+            format!(
+                "{}{text}{}",
+                powerline(&color, opts.powerline, false),
+                tmux_segment_end(&color, opts.powerline)
+            )
+        }
+    }
+}
+
+/// The load segment, coloured the way `load_string` colours it.
+#[must_use]
+pub fn load_segment(sample: &Sample, opts: &RenderOptions) -> String {
+    let text = load_text(&sample.load, opts.averages_count);
+    if text.is_empty() {
+        return text;
+    }
+    let percent = load_percent(&sample.load, sample.cpu_count);
+
+    match opts.color {
+        ColorMode::None => text,
+        ColorMode::Ansi => format!("{}{text}{ANSI_RESET}", load_color(percent).ansi()),
+        ColorMode::Tmux => {
+            let color = load_color(percent).tmux();
+            let mut out = powerline(&color, opts.powerline, false);
+            out.push_str(&text);
+            // The load segment ends the line, so it is the one that has to
+            // blend with whatever tmux draws to its right.
+            match (opts.powerline, opts.segments_right) {
+                (PowerlineMode::Left, Some(right)) => {
+                    out.push_str(&powerline(&color, PowerlineMode::Left, true));
+                    out.push_str(&powerline_char(&color, right, PowerlineMode::Left, true));
+                }
+                (PowerlineMode::Left, None) => {
+                    out.push_str(&powerline(&color, PowerlineMode::Left, true));
+                    out.push_str(&powerline(TMUX_RESET, PowerlineMode::Left, false));
+                }
+                (PowerlineMode::Right, Some(right)) => {
+                    out.push_str(&powerline_char(&color, right, PowerlineMode::Right, true));
+                }
+                (PowerlineMode::Right, None) => {}
+                (PowerlineMode::None, _) => out.push_str(TMUX_RESET),
+            }
+            out
+        }
+    }
+}
+
+/// What `cpu_string` and `mem_string` append after their text: the
+/// left-pointing separator's background flip, or a plain reset.
+fn tmux_segment_end(color: &str, mode: PowerlineMode) -> String {
+    match mode {
+        PowerlineMode::Left => powerline(color, PowerlineMode::Left, true),
+        PowerlineMode::Right => String::new(),
+        PowerlineMode::None => TMUX_RESET.to_string(),
+    }
+}
+
+/// The lookup table index for a percentage: truncated, and never negative.
+fn truncate_percent(percent: f32) -> u32 {
+    if percent <= 0.0 {
+        0
+    } else {
+        percent as u32
+    }
+}
+
 /// The complete one-line status: memory, then CPU, then load.
 #[must_use]
 pub fn status_line(sample: &Sample, opts: &RenderOptions) -> String {
     format!(
         "{}{}{}",
-        mem_text(&sample.memory, opts.mem_mode),
-        cpu_line(
-            sample.cpu_percent,
-            opts.cpu_mode,
-            sample.cpu_count,
-            opts.graph_style,
-            opts.graph_lines,
-        ),
-        load_text(&sample.load, opts.averages_count),
+        mem_segment(&sample.memory, opts),
+        cpu_segment(sample, opts),
+        load_segment(sample, opts),
     )
 }
 
@@ -141,6 +287,7 @@ mod tests {
     use super::{cpu_line, cpu_text, load_text, mem_text, status_line, RenderOptions};
     use crate::metrics::memory::{MemoryMode, MemoryStatus};
     use crate::metrics::{CpuMode, LoadAverages, Sample};
+    use crate::render::colors::{ColorMode, PowerlineMode};
     use crate::render::graph::GraphStyle;
 
     const MB: u64 = 1024 * 1024;
@@ -164,6 +311,14 @@ mod tests {
             cpu_count: 8,
         }
     }
+
+    /// The lookup table entries the sample above lands on, taken from
+    /// `common/luts.h`: 51% CPU, 36% memory, and a load percentage of
+    /// `2.11 / 8 * 0.5 * 100` truncated to 13.
+    const CPU_COLOR: &str = "#[fg=brightwhite,bg=colour56]";
+    const MEM_COLOR: &str = "#[fg=brightwhite,bg=colour72]";
+    const LOAD_COLOR: &str = "#[fg=brightwhite,bg=colour59]";
+    const RESET: &str = "#[fg=default,bg=default]";
 
     #[test]
     fn cpu_text_is_right_aligned_in_six_columns() {
@@ -265,5 +420,106 @@ mod tests {
             status_line(&sample(), &RenderOptions::default()),
             "2885/7987MB [|||||     ]  51.2% 2.11 2.35 2.44"
         );
+    }
+
+    fn colored(color: ColorMode, powerline: PowerlineMode) -> RenderOptions {
+        RenderOptions {
+            color,
+            powerline,
+            ..RenderOptions::default()
+        }
+    }
+
+    #[test]
+    fn tmux_colors_wrap_every_segment_like_the_original() {
+        assert_eq!(
+            status_line(&sample(), &colored(ColorMode::Tmux, PowerlineMode::None)),
+            format!(
+                "{MEM_COLOR}2885/7987MB{RESET}\
+                 {CPU_COLOR} [|||||     ]  51.2%{RESET}\
+                 {LOAD_COLOR} 2.11 2.35 2.44{RESET}"
+            )
+        );
+    }
+
+    #[test]
+    fn ansi_colors_use_the_same_tables() {
+        // colour72 with a brightwhite (colour15) foreground.
+        let line = status_line(&sample(), &colored(ColorMode::Ansi, PowerlineMode::None));
+        assert!(
+            line.starts_with("\x1b[38;5;15m\x1b[48;5;72m2885/7987MB\x1b[0m"),
+            "{line}"
+        );
+        assert!(
+            line.contains("\x1b[48;5;56m [|||||     ]  51.2%\x1b[0m"),
+            "{line}"
+        );
+        assert!(
+            line.ends_with("\x1b[48;5;59m 2.11 2.35 2.44\x1b[0m"),
+            "{line}"
+        );
+    }
+
+    #[test]
+    fn powerline_left_inverts_each_segment_background() {
+        let line = status_line(&sample(), &colored(ColorMode::Tmux, PowerlineMode::Left));
+        assert_eq!(
+            line,
+            format!(
+                "{MEM_COLOR} 2885/7987MB #[fg=colour72]\
+                 #[bg=colour56]\u{e0b0}{CPU_COLOR} [|||||     ]  51.2% #[fg=colour56]\
+                 #[bg=colour59]\u{e0b0}{LOAD_COLOR} 2.11 2.35 2.44 #[fg=colour59]\
+                 #[bg=default]\u{e0b0}{RESET}"
+            )
+        );
+    }
+
+    #[test]
+    fn powerline_right_points_the_separators_the_other_way() {
+        let line = status_line(&sample(), &colored(ColorMode::Tmux, PowerlineMode::Right));
+        assert_eq!(
+            line,
+            format!(
+                "#[bg=default] #[fg=colour72]\u{e0b2}{MEM_COLOR} 2885/7987MB \
+                 #[fg=colour56]\u{e0b2}{CPU_COLOR} [|||||     ]  51.2% \
+                 #[fg=colour59]\u{e0b2}{LOAD_COLOR} 2.11 2.35 2.44"
+            )
+        );
+    }
+
+    #[test]
+    fn segment_colors_blend_with_the_neighbouring_tmux_colours() {
+        let opts = RenderOptions {
+            segments_left: Some(4),
+            segments_right: Some(8),
+            ..colored(ColorMode::Tmux, PowerlineMode::Right)
+        };
+        let line = status_line(&sample(), &opts);
+        assert!(
+            line.starts_with(&format!("#[fg=colour72] #[bg=colour4]\u{e0b2}{MEM_COLOR} ")),
+            "{line}"
+        );
+        assert!(
+            line.ends_with(&format!("{LOAD_COLOR}#[fg=colour8] \u{e0b2}{LOAD_COLOR}")),
+            "{line}"
+        );
+    }
+
+    #[test]
+    fn colours_never_leak_into_the_plain_output() {
+        let plain = status_line(&sample(), &RenderOptions::default());
+        assert!(!plain.contains("#["));
+        assert!(!plain.contains('\x1b'));
+    }
+
+    #[test]
+    fn zero_averages_leaves_the_load_segment_out_even_in_colour() {
+        let opts = RenderOptions {
+            averages_count: 0,
+            ..colored(ColorMode::Tmux, PowerlineMode::None)
+        };
+        let line = status_line(&sample(), &opts);
+        assert!(line.ends_with(&format!("  51.2%{RESET}")), "{line}");
+        assert!(!line.contains(LOAD_COLOR), "{line}");
     }
 }
