@@ -1,5 +1,5 @@
-//! Daemon mode: sample on an interval and report Space sidebar tokens for
-//! every open workspace, or for the active one alone — see [`WorkspaceScope`].
+//! Daemon mode: sample on an interval and report Space sidebar tokens for the
+//! focused workspace, or for every open one — see [`WorkspaceScope`].
 //!
 //! The loop is deliberately quiet. herdr copies a plugin's stdout and stderr
 //! into a capped command log, so a process that printed a line every two
@@ -38,16 +38,18 @@ pub const LOG_FILE_NAME: &str = "daemon.log";
 /// Which workspaces a tick's tokens go to.
 ///
 /// The readings are the whole machine's, so reporting them to every open
-/// workspace repeats the same three rows down the sidebar.
-/// [`Focused`](Self::Focused) puts them under the active workspace alone,
-/// which is also one `herdr` call a tick rather than one per workspace.
+/// workspace repeats the same three rows down the sidebar. The default is
+/// therefore [`Focused`](Self::Focused): the rows sit under the active
+/// workspace alone and follow the focus, which is also one `herdr` call a tick
+/// rather than one per workspace. [`All`](Self::All) is for a sidebar that
+/// wants the numbers visible against whichever Space the eye is on.
 #[derive(Clone, Copy, Debug, Default, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "lowercase")]
 pub enum WorkspaceScope {
     /// Every open workspace.
-    #[default]
     All,
     /// The focused workspace only.
+    #[default]
     Focused,
 }
 
@@ -104,7 +106,7 @@ impl Default for DaemonOptions {
             interval: DEFAULT_INTERVAL,
             ttl_ms: default_ttl_ms(DEFAULT_INTERVAL),
             source: "system-monitor".to_string(),
-            workspaces: WorkspaceScope::All,
+            workspaces: WorkspaceScope::Focused,
             tokens: TokenOptions::default(),
             history_len: TokenOptions::default().graph_lines,
             max_failures: DEFAULT_MAX_FAILURES,
@@ -728,7 +730,7 @@ mod tests {
         assert_eq!("FOCUSED".parse(), Ok(WorkspaceScope::Focused));
         assert_eq!("Focused".parse(), Ok(WorkspaceScope::Focused));
         assert!("everything".parse::<WorkspaceScope>().is_err());
-        assert_eq!(WorkspaceScope::default(), WorkspaceScope::All);
+        assert_eq!(WorkspaceScope::default(), WorkspaceScope::Focused);
     }
 
     #[test]
@@ -754,7 +756,7 @@ mod tests {
     }
 
     #[test]
-    fn every_open_workspace_is_a_target_by_default() {
+    fn the_all_scope_targets_every_open_workspace() {
         let daemon = daemon_with(WorkspaceScope::All);
         let workspaces = [workspace("w1", false), workspace("w9", true)];
 
@@ -762,10 +764,11 @@ mod tests {
     }
 
     #[test]
-    fn the_focused_scope_reports_to_the_active_workspace_alone() {
-        let daemon = daemon_with(WorkspaceScope::Focused);
+    fn the_default_scope_reports_to_the_active_workspace_alone() {
+        let daemon = Daemon::new(DaemonOptions::default());
         let workspaces = [workspace("w1", false), workspace("w9", true)];
 
+        assert_eq!(daemon.options.workspaces, WorkspaceScope::Focused);
         assert_eq!(daemon.targets(&workspaces), vec!["w9"]);
     }
 

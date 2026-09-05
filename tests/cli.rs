@@ -359,12 +359,12 @@ fn recorded(log: &Path) -> Vec<String> {
 }
 
 #[test]
-fn the_daemon_reports_tokens_for_every_workspace() {
+fn the_all_scope_reports_tokens_for_every_workspace() {
     let dir = TempDir::new("daemon-reports");
     let log = dir.join("argv.log");
     let fake = write_fake_herdr(&dir, &log, 0);
 
-    let mut daemon = spawn_daemon(&dir, &fake);
+    let mut daemon = spawn_daemon_with(&dir, &fake, &["--workspaces", "all"]);
     std::thread::sleep(Duration::from_secs(3));
     daemon.kill().expect("the daemon is killed");
     daemon.wait().expect("the daemon is reaped");
@@ -401,12 +401,13 @@ fn the_daemon_reports_tokens_for_every_workspace() {
 }
 
 #[test]
-fn the_focused_scope_reports_to_the_active_workspace_alone() {
+fn the_daemon_reports_to_the_active_workspace_alone_by_default() {
     let dir = TempDir::new("daemon-focused");
     let log = dir.join("argv.log");
     let fake = write_fake_herdr(&dir, &log, 0);
 
-    let mut daemon = spawn_daemon_with(&dir, &fake, &["--workspaces", "focused"]);
+    // No --workspaces: the focused scope is the default.
+    let mut daemon = spawn_daemon(&dir, &fake);
     std::thread::sleep(Duration::from_secs(3));
     daemon.kill().expect("the daemon is killed");
     daemon.wait().expect("the daemon is reaped");

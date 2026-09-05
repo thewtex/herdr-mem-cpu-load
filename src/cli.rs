@@ -130,8 +130,8 @@ pub struct DaemonFlags {
     #[arg(long, value_name = "ID")]
     pub source: Option<String>,
 
-    /// Which workspaces the tokens go to: all, or focused for the active
-    /// workspace alone. [default: all]
+    /// Which workspaces the tokens go to: focused for the active workspace
+    /// alone, or all. [default: focused]
     #[arg(long, value_name = "all|focused")]
     pub workspaces: Option<WorkspaceScope>,
 
@@ -335,7 +335,8 @@ mod tests {
         assert_eq!(options.interval, Duration::from_secs(1));
         assert_eq!(options.ttl_ms, 3000);
         assert_eq!(options.source, "system-monitor");
-        assert_eq!(options.workspaces, WorkspaceScope::All);
+        // The rows follow the focus unless a sidebar asks for them everywhere.
+        assert_eq!(options.workspaces, WorkspaceScope::Focused);
         assert_eq!(options.history_len, 10);
         assert!(!options.verbose);
         assert_eq!(options.log, None);
@@ -367,10 +368,10 @@ mod tests {
         assert_eq!(options.ttl_ms, 9000);
         assert_eq!(options.source, "my-monitor");
         assert_eq!(
-            settings(&["--daemon", "--workspaces", "focused"])
+            settings(&["--daemon", "--workspaces", "all"])
                 .daemon_options()
                 .workspaces,
-            WorkspaceScope::Focused
+            WorkspaceScope::All
         );
         assert_eq!(options.history_len, 24);
         assert!(options.verbose);

@@ -34,13 +34,13 @@
 # The metadata source the tokens are reported under. Daemon mode only.
 #source = "system-monitor"
 
-# Which workspaces the tokens are reported to. "all" gives every open
-# workspace its own copy of the rows; "focused" reports to the active
-# workspace alone, which is the one to pick when several Spaces are open and
-# the same machine-wide numbers repeated under each of them are noise. The
-# rows are taken off a workspace as soon as it stops being the active one.
-# Daemon mode only.
-#workspaces = "all"
+# Which workspaces the tokens are reported to. "focused" puts the rows under
+# the active workspace alone and moves them as the focus moves, which is the
+# default because the readings are the whole machine's and repeating them
+# under every Space says nothing new. "all" gives every open workspace its own
+# copy, for a sidebar that wants the numbers next to whichever Space the eye
+# is on. Daemon mode only.
+#workspaces = "focused"
 
 # The CPU graph: "classic" ([|||||     ]), "blocks" (unicode eighths), or
 # "vertical" (a single bar character). One-line mode defaults to "classic",

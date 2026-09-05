@@ -20,19 +20,21 @@ together by `scripts/release.sh`; CI fails if they drift.
   eighth-resolution `blocks` bar, and the single-character `vertical` one.
 - tmux colour markup and powerline separators from the original's lookup
   tables, plus `--ansi` for the same colours as 256-colour SGR escapes.
-- `--daemon`: a resident sampler that reports Space sidebar tokens to every
-  open workspace over the `herdr` CLI. Fourteen tokens per report —
+- `--daemon`: a resident sampler that reports Space sidebar tokens to the
+  focused workspace over the `herdr` CLI. Fourteen tokens per report —
   `$cpu_status`, `$mem_status`, `$load_status`, `$sys_status`, `$cpu_history`,
   and an `_ok`/`_warn`/`_hot` level token for each of the three metrics — with
   the levels held by hysteresis so a metric sitting on a threshold does not
   repaint its row every tick.
 - A singleton lock (`flock` on Unix, `LockFileEx` on Windows) so a herdr live
   handoff, which re-runs `[[startup]]`, cannot double up the daemon.
-- `workspaces = "focused"` (`--workspaces focused`): report the sidebar rows to
-  the active workspace alone instead of every open one, so one machine's
-  numbers are not repeated under every Space. The rows follow the focus — the
-  workspace being left has its tokens cleared on the same tick, not at the end
-  of the ttl — and a list with nothing focused holds them where they are.
+- `workspaces`: which workspaces the sidebar rows are reported to. The default
+  is `"focused"`, the active workspace alone, so one machine's numbers are not
+  repeated under every Space; the rows follow the focus, and the workspace
+  being left has its tokens cleared on the same tick rather than at the end of
+  the ttl. A list with nothing focused holds them where they are.
+  `workspaces = "all"` (`--workspaces all`) restores a copy under every open
+  workspace.
 - Live configuration reload: the daemon stats its `config.toml` once a tick and
   re-runs the whole merge when the file changes, so an edit lands within one
   interval instead of needing a restart. The command line still wins over the

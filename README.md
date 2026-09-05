@@ -9,15 +9,16 @@ re-imagined in Rust from [tmux-mem-cpu-load](https://github.com/thewtex/tmux-mem
 One binary, two jobs. Run it plain and it prints the one line the original
 prints, tmux colours and all, so it is a drop-in replacement in a
 `status-left`. Run it with `--daemon` and it becomes the herdr plugin of the
-same name, feeding live CPU, memory, and load rows to every workspace in the
-Space sidebar.
+same name, feeding live CPU, memory, and load rows to the active workspace in
+the Space sidebar — or to every open one, with `workspaces = "all"`.
 
 ## Overview
 
 The daemon samples the machine every interval and reports a handful of Space
-sidebar tokens to each open workspace — or to the active one alone, with
-`workspaces = "focused"`. Put the ones you want in `[ui.sidebar.spaces]` and
-the sidebar grows system rows that change colour as the machine heats up:
+sidebar tokens to the focused workspace, following it as the focus moves — or
+to every open workspace, with `workspaces = "all"`. Put the ones you want in
+`[ui.sidebar.spaces]` and the sidebar grows system rows that change colour as
+the machine heats up:
 
 ```
 ┌─ Spaces ─────────────────────────────┐
@@ -28,12 +29,12 @@ the sidebar grows system rows that change colour as the machine heats up:
 │    ▕██▋       ▏ 2.11 2.35 2.44       │   $load_ok
 │    ▁▂▃▅▆▇▆▄▃▂                        │   $cpu_history
 │                                      │
-│ ○  dotfiles                          │
-│    ▕████████▉ ▏ 89.4%                │   $cpu_hot    (red)
-│    ▕███▋      ▏ 2885/7987MB          │   $mem_ok
-│    ▕██▋       ▏ 2.11 2.35 2.44       │   $load_ok
+│ ○  dotfiles                          │   no rows: it is not the active one
 └──────────────────────────────────────┘
 ```
+
+The rows sit under the active Space and move with it. Set
+`workspaces = "all"` to give every open Space its own copy instead.
 
 And on a tmux status line, the same sample as one row:
 
@@ -237,7 +238,7 @@ command line over the defaults.
 | `interval_secs` | `1` | Seconds between samples; also the CPU measurement window. 1 to 3600. |
 | `ttl_ms` | `interval_secs × 2000 + 1000` | How long herdr keeps the tokens without a refresh. 1 to 86400000, herdr's accepted range. Daemon only. |
 | `source` | `"system-monitor"` | The metadata source the tokens are reported under. Daemon only. |
-| `workspaces` | `"all"` | Which workspaces the rows appear under: `"all"`, or `"focused"` for the active one alone. Daemon only. |
+| `workspaces` | `"focused"` | Which workspaces the rows appear under: `"focused"` for the active one alone, or `"all"`. Daemon only. |
 | `graph_style` | `"classic"`, `"blocks"` with `--daemon` | `"classic"`, `"blocks"`, or `"vertical"`. |
 | `graph_lines` | `10` | Cells in the CPU graph. `0` hides it, `64` is the maximum. |
 | `mem_graph_lines` | `graph_lines` | Cells in the memory bar. |
@@ -260,7 +261,7 @@ A complete file, all defaults spelled out:
 interval_secs = 1
 ttl_ms = 3000
 source = "system-monitor"
-workspaces = "all"
+workspaces = "focused"
 graph_style = "classic"
 graph_lines = 10
 mem_graph_lines = 10
@@ -323,7 +324,7 @@ herdr-mem-cpu-load [OPTIONS]
 | `--daemon` | off | Run as a herdr plugin daemon instead of printing one line. |
 | `--ttl-ms <N>` | `interval × 2 + 1000` | How long herdr keeps the reported tokens. Daemon mode only. |
 | `--source <ID>` | `system-monitor` | Metadata source the tokens are reported under. Daemon mode only. |
-| `--workspaces <all\|focused>` | `all` | Report to every open workspace, or to the active one alone. Daemon mode only. |
+| `--workspaces <all\|focused>` | `focused` | Report to the active workspace alone, or to every open one. Daemon mode only. |
 | `--history <N>` | `--graph-lines` | Samples kept for the `$cpu_history` sparkline. Daemon mode only. |
 | `--log-file <PATH>` | – | Append daemon diagnostics here. Daemon mode only. |
 | `--verbose` | off | Log every tick's status line, not just errors. Daemon mode only. |
@@ -479,20 +480,19 @@ herdr-mem-cpu-load --daemon --log-file /tmp/mem-cpu-load.log &
 Add `--verbose` (or `verbose = true`) to log every tick's status line, not just
 errors.
 
-**The same rows repeat under every Space.** They are one machine's numbers, so
-by default every open workspace gets a copy. Report them to the active
-workspace instead:
+**The rows only show under one Space.** That is the default: they are one
+machine's numbers, so repeating them under every Space says nothing new. The
+rows follow the focus — the workspace being left has its tokens cleared on the
+same tick the new one is given them, rather than keeping them until the TTL
+runs out — and it is one `herdr` call per tick instead of one per workspace.
+If herdr answers with no focused workspace at all, which happens while the
+focus is moving, the rows stay where they last were rather than blinking out.
+
+To put a copy under every open Space instead:
 
 ```toml
-workspaces = "focused"
+workspaces = "all"
 ```
-
-The rows follow the focus: the workspace being left has its tokens cleared on
-the same tick the new one is given them, rather than keeping them until the
-TTL runs out. It is also one `herdr` call per tick instead of one per
-workspace. If herdr answers with no focused workspace at all — which happens
-while the focus is moving — the rows stay where they last were rather than
-blinking out.
 
 **Rows appear and then vanish.** The tokens have a TTL: herdr drops them if the
 daemon stops refreshing. The default is two intervals plus a second of slack,

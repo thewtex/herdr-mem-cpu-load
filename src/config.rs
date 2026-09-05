@@ -355,7 +355,7 @@ impl Default for Settings {
             interval_secs: DEFAULT_INTERVAL_SECS,
             ttl_ms: default_ttl_ms(interval),
             source: DEFAULT_SOURCE.to_string(),
-            workspaces: WorkspaceScope::All,
+            workspaces: WorkspaceScope::Focused,
             graph_style: GraphStyle::Classic,
             graph_lines: DEFAULT_GRAPH_LINES,
             mem_graph_lines: DEFAULT_GRAPH_LINES,
@@ -675,7 +675,7 @@ mod tests {
             cpu_mode = 1
             averages_count = 1
             source = "box"
-            workspaces = "focused"
+            workspaces = "all"
             verbose = true
             graph_style = "vertical"
 
@@ -697,7 +697,7 @@ mod tests {
         assert_eq!(settings.cpu_mode, CpuMode::Threads);
         assert_eq!(settings.averages_count, 1);
         assert_eq!(settings.source, "box");
-        assert_eq!(settings.workspaces, WorkspaceScope::Focused);
+        assert_eq!(settings.workspaces, WorkspaceScope::All);
         assert!(settings.verbose);
         assert_eq!(settings.graph_style, GraphStyle::Vertical);
         // The ttl still follows the interval it was not given alongside.
@@ -930,9 +930,12 @@ mod tests {
     }
 
     #[test]
-    fn the_template_documents_every_key_a_file_may_set() {
+    fn the_template_documents_every_key_a_file_may_set_at_its_real_default() {
         // Two keys have already been added to `FileConfig` without the
-        // template following; this is what notices the third.
+        // template following; this is what notices the third. The value is
+        // checked as well as the key, because a template that shows a default
+        // the code no longer has is a lie a reader has no way to catch: the
+        // line is commented out, so it never fails to parse.
         let printed = Settings::default()
             .to_toml()
             .expect("the defaults serialise");
@@ -943,11 +946,15 @@ mod tests {
                 continue;
             }
             let key = line.split(" = ").next().unwrap_or(line);
-            assert!(
-                DEFAULT_CONFIG_TEMPLATE
-                    .lines()
-                    .any(|documented| documented.trim_start_matches('#').starts_with(key)),
-                "`{key}` is settable but the template never mentions it"
+            let documented: Vec<&str> = DEFAULT_CONFIG_TEMPLATE
+                .lines()
+                .map(|line| line.trim_start_matches('#').trim())
+                .filter(|documented| documented.split(" = ").next().unwrap_or(documented) == key)
+                .collect();
+            assert_eq!(
+                documented,
+                vec![line],
+                "the template does not show `{key}` at its default"
             );
         }
     }
