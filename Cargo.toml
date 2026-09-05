@@ -1,0 +1,34 @@
+[package]
+name = "herdr-mem-cpu-load"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.85"
+description = "CPU, memory, and load average monitor plugin for herdr, re-imagined from tmux-mem-cpu-load"
+license = "Apache-2.0"
+repository = "https://github.com/thewtex/herdr-mem-cpu-load"
+keywords = ["herdr", "tmux", "cpu", "memory", "monitor"]
+categories = ["command-line-utilities"]
+
+[dependencies]
+clap = { version = "4", features = ["derive"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
+
+[profile.release]
+lto = true
+codegen-units = 1
+strip = true
+opt-level = "s"
+
+[lints.clippy]
+all = { level = "warn", priority = -1 }
+pedantic = { level = "warn", priority = -1 }
+# The port does a lot of intentional numeric casts between integer counters and
+# the floating point percentages the original C++ printed.
+cast_precision_loss = "allow"
+cast_possible_truncation = "allow"
+cast_sign_loss = "allow"
+module_name_repetitions = "allow"

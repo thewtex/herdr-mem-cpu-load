@@ -1,0 +1,9 @@
+id = "thewtex.mem-cpu-load"
+name = "Mem CPU Load"
+version = "0.1.0"
+min_herdr_version = "0.8.0"
+description = "CPU, memory, and load average status for the Space sidebar"
+platforms = ["linux", "macos", "windows"]
+
+[[build]]
+command = ["cargo", "build", "--release", "--locked"]
