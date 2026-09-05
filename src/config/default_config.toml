@@ -19,12 +19,13 @@
 # the sidebar down with it.
 
 # Seconds between samples. Also the window the CPU percentage is measured over.
-# Minimum 1.
+# 1 to 3600; a value outside that range is clamped into it.
 #interval_secs = 1
 
 # How long herdr keeps the reported tokens, in milliseconds. The default is
 # two intervals plus a second of slack, so one slow tick does not blink the
-# sidebar rows out of existence. Daemon mode only.
+# sidebar rows out of existence. 1 to 86400000, herdr's accepted range; a
+# value outside it is clamped. Daemon mode only.
 #ttl_ms = 3000
 
 # The metadata source the tokens are reported under. Daemon mode only.
@@ -35,7 +36,9 @@
 # --daemon defaults to "blocks".
 #graph_style = "classic"
 
-# Cells in the CPU graph. 0 hides it.
+# Cells in the CPU graph. 0 hides it, 64 is the maximum. A bar is narrowed
+# further still when the reading beside it would not fit: a sidebar token
+# holds 80 characters, and the reading is the half worth keeping.
 #graph_lines = 10
 
 # Cells in the memory bar. Defaults to graph_lines. Memory moves far less than

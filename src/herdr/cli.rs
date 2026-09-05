@@ -10,7 +10,10 @@ use std::time::{Duration, Instant};
 use serde::Deserialize;
 
 /// How long any single herdr invocation may take before it is killed.
-const COMMAND_TIMEOUT: Duration = Duration::from_secs(10);
+///
+/// Public because it is part of this client's contract: the daemon's tick has
+/// to outlast it, and [`HerdrError::Timeout`] names it.
+pub const COMMAND_TIMEOUT: Duration = Duration::from_secs(10);
 /// How often the timeout guard checks on the child.
 const POLL_INTERVAL: Duration = Duration::from_millis(20);
 /// Captured stderr is only used for messages, so keep it short enough to log.

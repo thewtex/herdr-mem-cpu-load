@@ -9,10 +9,11 @@ use std::path::{Path, PathBuf};
 
 use clap::{Args, Parser};
 
-use crate::config::{self, Settings};
+use crate::config::{self, Settings, MAX_GRAPH_LINES, MAX_INTERVAL_SECS, MAX_TTL_MS, MIN_TTL_MS};
 use crate::metrics::memory::MemoryMode;
 use crate::metrics::CpuMode;
 use crate::render::graph::GraphStyle;
+use crate::tokens::MAX_TOKEN_VALUE_CHARS;
 
 /// CPU, memory, and load average monitor for herdr and tmux.
 ///
@@ -28,17 +29,17 @@ pub struct Cli {
         short = 'i',
         long,
         value_name = "SECS",
-        value_parser = clap::value_parser!(u64).range(1..)
+        value_parser = clap::value_parser!(u64).range(1..=MAX_INTERVAL_SECS)
     )]
     pub interval: Option<u64>,
 
     /// How many cells the CPU graph is drawn with. 0 hides the graph.
     /// [default: 10]
-    #[arg(short = 'g', long, value_name = "N")]
+    #[arg(short = 'g', long, value_name = "N", value_parser = parse_graph_lines)]
     pub graph_lines: Option<usize>,
 
     /// How many cells the memory bar is drawn with. [default: --graph-lines]
-    #[arg(long, value_name = "N")]
+    #[arg(long, value_name = "N", value_parser = parse_graph_lines)]
     pub mem_graph_lines: Option<usize>,
 
     /// Memory display mode. 0: used/total, 1: free memory, 2: usage percent.
@@ -115,7 +116,7 @@ pub struct DaemonFlags {
     #[arg(
         long,
         value_name = "N",
-        value_parser = clap::value_parser!(u64).range(1..=86_400_000)
+        value_parser = clap::value_parser!(u64).range(MIN_TTL_MS..=MAX_TTL_MS)
     )]
     pub ttl_ms: Option<u64>,
 
@@ -181,6 +182,22 @@ fn parse_mem_mode(value: &str) -> Result<MemoryMode, String> {
 
 fn parse_cpu_mode(value: &str) -> Result<CpuMode, String> {
     parse_mode(value).and_then(|mode| CpuMode::try_from(mode).map_err(|error| error.to_string()))
+}
+
+/// A bar width, rejecting one so wide that the reading beside it could not
+/// fit in a sidebar token.
+fn parse_graph_lines(value: &str) -> Result<usize, String> {
+    let cells: usize = value
+        .parse()
+        .map_err(|_| format!("`{value}` is not a number of cells"))?;
+    if cells > MAX_GRAPH_LINES {
+        return Err(format!(
+            "{cells} cells is wider than the {MAX_GRAPH_LINES} cell maximum; \
+             a sidebar token holds {MAX_TOKEN_VALUE_CHARS} characters, and a \
+             wider bar leaves no room for the reading beside it"
+        ));
+    }
+    Ok(cells)
 }
 
 fn parse_mode(value: &str) -> Result<u8, String> {
@@ -272,6 +289,28 @@ mod tests {
                 "expected {args:?} to be rejected"
             );
         }
+    }
+
+    #[test]
+    fn a_bar_wider_than_a_token_is_rejected_with_an_explanation() {
+        let error = Cli::try_parse_from(["herdr-mem-cpu-load", "-g", "65"])
+            .expect_err("65 cells does not fit a token");
+        let message = error.to_string();
+        assert!(message.contains("64 cell maximum"), "{message}");
+        assert!(message.contains("80 characters"), "{message}");
+
+        assert!(Cli::try_parse_from(["herdr-mem-cpu-load", "-g", "64"]).is_ok());
+        assert!(Cli::try_parse_from(["herdr-mem-cpu-load", "--mem-graph-lines", "65"]).is_err());
+        assert!(Cli::try_parse_from(["herdr-mem-cpu-load", "-g", "-1"]).is_err());
+    }
+
+    #[test]
+    fn an_interval_longer_than_an_hour_is_rejected() {
+        assert!(Cli::try_parse_from(["herdr-mem-cpu-load", "-i", "3600"]).is_ok());
+        assert!(Cli::try_parse_from(["herdr-mem-cpu-load", "-i", "3601"]).is_err());
+        // And the ttl still spans herdr's whole accepted range.
+        assert!(Cli::try_parse_from(["herdr-mem-cpu-load", "--ttl-ms", "86400000"]).is_ok());
+        assert!(Cli::try_parse_from(["herdr-mem-cpu-load", "--ttl-ms", "86400001"]).is_err());
     }
 
     #[test]

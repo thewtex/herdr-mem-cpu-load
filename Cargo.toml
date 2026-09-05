@@ -8,6 +8,16 @@ license = "Apache-2.0"
 repository = "https://github.com/thewtex/herdr-mem-cpu-load"
 keywords = ["herdr", "tmux", "cpu", "memory", "monitor"]
 categories = ["command-line-utilities"]
+# `cargo package` ships the crate and the three files that explain it, and
+# nothing else: not the playbooks, not the CI workflows, not the release
+# scripts, not the integration tests that spawn a daemon.
+include = [
+    "src/**",
+    "README.md",
+    "LICENSE",
+    "CHANGELOG.md",
+    "herdr-plugin.toml",
+]
 
 [dependencies]
 clap = { version = "4", features = ["derive"] }

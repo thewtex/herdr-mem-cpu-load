@@ -20,6 +20,8 @@ pub const MAX_TOKEN_KEYS: usize = 16;
 pub const MAX_TOKEN_VALUE_CHARS: usize = 80;
 /// herdr caps a token key at 32 characters.
 pub const MAX_TOKEN_KEY_CHARS: usize = 32;
+/// The characters a `classic` or `blocks` bar spends on its brackets or frame.
+const BAR_FRAME_CHARS: usize = 2;
 
 /// The metrics that get a level token, in report order.
 const METRICS: [&str; 3] = ["cpu", "mem", "load"];
@@ -203,6 +205,49 @@ impl Default for TokenOptions {
 }
 
 impl TokenOptions {
+    /// These options with both bar widths narrowed until every token fits
+    /// inside [`MAX_TOKEN_VALUE_CHARS`].
+    ///
+    /// Something has to give when a wide bar and a long reading do not both
+    /// fit in one token. Truncating cuts the percentage off the end, which is
+    /// the half a reader actually needs; narrowing the bar costs a cell of a
+    /// graph that is approximate anyway. `sys_status` is the binding
+    /// constraint: it carries all three segments and the bar at once.
+    ///
+    /// One budget is applied to both bars rather than one each, so the CPU,
+    /// memory, and load rows still line up under each other in the sidebar.
+    /// [`GraphStyle::Vertical`] is one character wide whatever `graph_lines`
+    /// says, so there is nothing to narrow for it.
+    #[must_use]
+    fn fitted(self, mem: &str, cpu: &str, load: &str) -> Self {
+        if self.graph_style == GraphStyle::Vertical {
+            return self;
+        }
+        let width = |text: &str| text.chars().count();
+        // `cpu_status`, `mem_status`, and `load_status` are a bar, a space,
+        // and the trimmed text. `sys_status` is the three segments run
+        // together, with the classic bar alone taking a leading space.
+        let widest = [
+            1 + width(cpu.trim()),
+            1 + width(mem),
+            1 + width(load.trim()),
+            width(mem)
+                + usize::from(self.graph_style == GraphStyle::Classic)
+                + width(cpu)
+                + width(load),
+        ]
+        .into_iter()
+        .max()
+        .unwrap_or(0);
+
+        let cells = MAX_TOKEN_VALUE_CHARS.saturating_sub(widest + BAR_FRAME_CHARS);
+        Self {
+            graph_lines: self.graph_lines.min(cells),
+            mem_graph_lines: self.mem_graph_lines.min(cells),
+            ..self
+        }
+    }
+
     /// The one-line renderer's options, used for the combined `sys_status`.
     ///
     /// Sidebar tokens carry no colour markup of their own: herdr styles a row
@@ -334,10 +379,17 @@ pub fn build_tokens(
 ) -> TokenSet {
     let mut tokens = TokenSet::default();
 
+    // The text comes first: how wide a bar can be depends on how much room
+    // the reading beside it leaves.
+    let cpu_reading = cpu_text(sample.cpu_percent, opts.cpu_mode, sample.cpu_count);
+    let mem_reading = mem_text(&sample.memory, opts.mem_mode);
+    let load_reading = load_text(&sample.load, opts.averages_count);
+    let opts = &opts.fitted(&mem_reading, &cpu_reading, &load_reading);
+
     let cpu_status = format!(
         "{} {}",
         render_bar(opts.graph_style, sample.cpu_percent, opts.graph_lines),
-        cpu_text(sample.cpu_percent, opts.cpu_mode, sample.cpu_count).trim()
+        cpu_reading.trim()
     );
     tokens.assign("cpu_status", &cpu_status);
 
@@ -345,7 +397,7 @@ pub fn build_tokens(
     let mem_status = format!(
         "{} {}",
         render_bar(opts.graph_style, mem_percent, opts.mem_graph_lines),
-        mem_text(&sample.memory, opts.mem_mode)
+        mem_reading
     );
     tokens.assign("mem_status", &mem_status);
 
@@ -358,7 +410,7 @@ pub fn build_tokens(
                 (load * 100.0).min(100.0) as f32,
                 opts.graph_lines
             ),
-            load_text(&sample.load, opts.averages_count).trim()
+            load_reading.trim()
         )
     });
     match &load_status {
@@ -413,8 +465,9 @@ mod tests {
         build_tokens, classify, is_valid_key, next, truncate_chars, Level, LevelTracker,
         Thresholds, TokenOptions, MAX_TOKEN_KEYS, MAX_TOKEN_VALUE_CHARS, PERCENT_MARGIN,
     };
-    use crate::metrics::{LoadAverages, MemoryStatus, Sample};
-    use crate::render::graph::sparkline;
+    use crate::metrics::{CpuMode, LoadAverages, MemoryStatus, Sample};
+    use crate::render::format::{load_text, mem_text};
+    use crate::render::graph::{sparkline, GraphStyle};
 
     fn sample(cpu_percent: f32) -> Sample {
         Sample {
@@ -663,6 +716,70 @@ mod tests {
                         value.chars().count()
                     );
                     assert!(!value.chars().any(char::is_control), "{key}");
+                }
+            }
+        }
+    }
+
+    /// Every field as wide as it realistically gets: four terabytes of memory,
+    /// a load average in the thousands, and enough threads that
+    /// [`CpuMode::Threads`] prints five digits.
+    fn extreme_sample() -> Sample {
+        Sample {
+            cpu_percent: 99.9,
+            memory: MemoryStatus {
+                used_bytes: 9_999 * 1024 * 1024,
+                total_bytes: 4_000_000 * 1024 * 1024,
+            },
+            load: LoadAverages {
+                one: 9_999.99,
+                five: 8_888.88,
+                fifteen: 7_777.77,
+            },
+            cpu_count: 256,
+        }
+    }
+
+    #[test]
+    fn a_wide_bar_is_narrowed_rather_than_the_reading_truncated() {
+        let history: Vec<f32> = (0u8..64).map(|step| f32::from(step) * 1.5).collect();
+
+        for graph_lines in [0, 10, 40, 60, 64] {
+            for graph_style in [
+                GraphStyle::Classic,
+                GraphStyle::Blocks,
+                GraphStyle::Vertical,
+            ] {
+                for cpu_mode in [CpuMode::Default, CpuMode::Threads] {
+                    for sample in [sample(51.2), extreme_sample()] {
+                        let opts = TokenOptions {
+                            graph_lines,
+                            mem_graph_lines: graph_lines,
+                            graph_style,
+                            cpu_mode,
+                            ..TokenOptions::default()
+                        };
+                        let tokens =
+                            build_tokens(&sample, &history, &opts, &mut LevelTracker::new());
+                        let context = format!("{graph_lines} cells, {graph_style}, {cpu_mode:?}");
+
+                        tokens
+                            .validate()
+                            .unwrap_or_else(|error| panic!("{context}: {error}"));
+
+                        // Nothing was cut: the reading is what sits at the end
+                        // of a value, and the bar is what gives way.
+                        let memory = mem_text(&sample.memory, opts.mem_mode);
+                        let load = load_text(&sample.load, opts.averages_count);
+                        for key in ["mem_status", "mem_ok", "mem_warn", "mem_hot"] {
+                            if let Some(value) = tokens.value(key) {
+                                assert!(value.ends_with(&memory), "{context}: {key} = {value}");
+                            }
+                        }
+                        let sys = tokens.value("sys_status").expect("sys_status is set");
+                        assert!(sys.starts_with(&memory), "{context}: {sys}");
+                        assert!(sys.ends_with(&load), "{context}: {sys}");
+                    }
                 }
             }
         }

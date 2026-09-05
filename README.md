@@ -1,5 +1,8 @@
 # herdr-mem-cpu-load
 
+[![CI](https://github.com/thewtex/herdr-mem-cpu-load/actions/workflows/ci.yml/badge.svg)](https://github.com/thewtex/herdr-mem-cpu-load/actions/workflows/ci.yml)
+[![License: Apache-2.0](https://img.shields.io/badge/license-Apache--2.0-blue.svg)](LICENSE)
+
 CPU, memory, and load average monitor for [herdr](https://github.com/thewtex/herdr),
 re-imagined in Rust from [tmux-mem-cpu-load](https://github.com/thewtex/tmux-mem-cpu-load).
 
@@ -179,7 +182,11 @@ five percentage points — a tenth of a core, for load — below it again, so a
 machine hovering on a threshold does not flicker between two colours.
 
 Values are capped at herdr's 80 character limit and contain no control
-characters, so a token is safe to place anywhere in a row.
+characters, so a token is safe to place anywhere in a row. When a wide bar and
+a long reading will not both fit, the bar is narrowed rather than the value
+truncated — a cell of an approximate graph is worth less than the number at the
+end of the row. `$sys_status` is what binds: it carries the memory, CPU, and
+load segments together.
 
 ## Configuration
 
@@ -219,11 +226,11 @@ a typo cannot silently kill the sidebar.
 
 | Key | Default | Meaning |
 | --- | --- | --- |
-| `interval_secs` | `1` | Seconds between samples; also the CPU measurement window. Minimum 1. |
-| `ttl_ms` | `interval_secs × 2000 + 1000` | How long herdr keeps the tokens without a refresh. Daemon only. |
+| `interval_secs` | `1` | Seconds between samples; also the CPU measurement window. 1 to 3600. |
+| `ttl_ms` | `interval_secs × 2000 + 1000` | How long herdr keeps the tokens without a refresh. 1 to 86400000, herdr's accepted range. Daemon only. |
 | `source` | `"system-monitor"` | The metadata source the tokens are reported under. Daemon only. |
 | `graph_style` | `"classic"`, `"blocks"` with `--daemon` | `"classic"`, `"blocks"`, or `"vertical"`. |
-| `graph_lines` | `10` | Cells in the CPU graph. `0` hides it. |
+| `graph_lines` | `10` | Cells in the CPU graph. `0` hides it, `64` is the maximum. |
 | `mem_graph_lines` | `graph_lines` | Cells in the memory bar. |
 | `mem_mode` | `0` | `0`: used/total, `1`: free memory, `2`: usage percent. |
 | `cpu_mode` | `0` | `0`: max 100%, `1`: max 100% per thread. |
@@ -276,8 +283,8 @@ herdr-mem-cpu-load [OPTIONS]
 
 | Flag | Default | Description |
 | --- | --- | --- |
-| `-i`, `--interval <SECS>` | `1` | Status refresh interval in seconds; also the CPU sampling window. Must be at least 1. |
-| `-g`, `--graph-lines <N>` | `10` | Cells in the CPU graph. `0` hides the graph. |
+| `-i`, `--interval <SECS>` | `1` | Status refresh interval in seconds; also the CPU sampling window. 1 to 3600. |
+| `-g`, `--graph-lines <N>` | `10` | Cells in the CPU graph. `0` hides the graph, `64` is the maximum. |
 | `--mem-graph-lines <N>` | `--graph-lines` | Cells in the memory bar. Daemon mode only; one-line mode draws no memory bar. |
 | `-m`, `--mem-mode <0\|1\|2>` | `0` | `0`: used/total, `1`: free memory, `2`: usage percent. |
 | `-t`, `--cpu-mode <0\|1>` | `0` | `0`: max 100%, `1`: max 100% per thread. |
@@ -484,6 +491,40 @@ herdr-mem-cpu-load --config /path/to/config.toml --print-config
 A malformed file is reported on stderr and then ignored; look for
 `herdr-mem-cpu-load: ignoring ...` in the plugin log. The daemon reads the file
 once at startup, so restart it after an edit.
+
+## Publishing to the herdr marketplace
+
+The [marketplace](https://herdr.dev/plugins/) indexes public GitHub
+repositories automatically; nothing is submitted and nothing is reviewed. A
+repository is listed when both of these are true:
+
+1. it carries the GitHub topic `herdr-plugin`, and
+2. its default branch contains at least one `herdr-plugin.toml` whose required
+   metadata parses — `id`, `name`, `version`, and `min_herdr_version`.
+
+This repository keeps its manifest at the root, which is also where
+`herdr plugin install thewtex/herdr-mem-cpu-load` looks. Manifests in
+subdirectories are indexed too, and each one is listed as a separately
+installable plugin under a single repository card.
+
+The index refreshes every 30 minutes and rescans a repository when its
+default-branch head moves, so a release shows up on its own. Forks, archived
+repositories, and repositories whose manifest metadata is malformed are
+excluded — which is why `scripts/check_manifest.py` runs in CI, and why
+`scripts/release.sh` is the only supported way to bump a version: a manifest
+that stops parsing, or a `version` that has drifted from `Cargo.toml`, silently
+drops the plugin off the listing.
+
+A card shows the repository name, description, star count, primary language,
+and last push, plus each manifest's `name` and `version`. See herdr's
+[marketplace documentation](https://herdr.dev/docs/marketplace/) for the full
+rules.
+
+## Contributing
+
+Build, test, cross-target checks, how to run this against a live herdr, and the
+release process are in [CONTRIBUTING.md](CONTRIBUTING.md). Changes are logged in
+[CHANGELOG.md](CHANGELOG.md).
 
 ## Credits
 

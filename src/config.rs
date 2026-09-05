@@ -42,8 +42,24 @@ pub const DEFAULT_CONFIG_TEMPLATE: &str = include_str!("config/default_config.to
 
 /// The default sampling interval, in seconds.
 pub const DEFAULT_INTERVAL_SECS: u64 = 1;
+/// The longest sampling interval. An hour between samples is already past the
+/// point where a "live" status line means anything, and the CPU measurement
+/// window is the interval, so one-line mode would block for that long.
+pub const MAX_INTERVAL_SECS: u64 = 3600;
+/// The shortest token lifetime herdr accepts.
+pub const MIN_TTL_MS: u64 = 1;
+/// The longest token lifetime herdr accepts: 24 hours.
+pub const MAX_TTL_MS: u64 = 86_400_000;
 /// The default width of the CPU graph, in cells.
 pub const DEFAULT_GRAPH_LINES: usize = 10;
+/// The widest bar the command line accepts.
+///
+/// A token value is capped at [`crate::tokens::MAX_TOKEN_VALUE_CHARS`]
+/// characters, and past 64 cells there is no room left for the reading beside
+/// the bar. [`crate::tokens::TokenOptions`] narrows a bar further still when
+/// the reading is long; this is only the point where asking is a mistake
+/// rather than a preference.
+pub const MAX_GRAPH_LINES: usize = 64;
 /// The default number of load averages printed.
 pub const DEFAULT_AVERAGES_COUNT: u8 = 3;
 /// The default metadata source id.
@@ -368,21 +384,26 @@ pub fn resolve(cli: &Cli, file: Option<FileConfig>) -> Settings {
     let file = file.unwrap_or_default();
     let defaults = Settings::default();
 
+    // The command line is range checked by clap; a configuration file is not,
+    // and neither is the ttl derived from an interval, so both are clamped
+    // here as well.
     let interval_secs = cli
         .interval
         .or(file.interval_secs)
         .unwrap_or(defaults.interval_secs)
-        .max(1);
+        .clamp(1, MAX_INTERVAL_SECS);
     let interval = Duration::from_secs(interval_secs);
 
     let graph_lines = cli
         .graph_lines
         .or(file.graph_lines)
-        .unwrap_or(defaults.graph_lines);
+        .unwrap_or(defaults.graph_lines)
+        .min(MAX_GRAPH_LINES);
     let mem_graph_lines = cli
         .mem_graph_lines
         .or(file.mem_graph_lines)
-        .unwrap_or(graph_lines);
+        .unwrap_or(graph_lines)
+        .min(MAX_GRAPH_LINES);
 
     // The two modes want different bars: the ASCII one on a tmux status line,
     // unicode blocks in the herdr sidebar.
@@ -414,7 +435,8 @@ pub fn resolve(cli: &Cli, file: Option<FileConfig>) -> Settings {
             .daemon
             .ttl_ms
             .or(file.ttl_ms)
-            .unwrap_or_else(|| default_ttl_ms(interval)),
+            .unwrap_or_else(|| default_ttl_ms(interval))
+            .clamp(MIN_TTL_MS, MAX_TTL_MS),
         source: cli
             .daemon
             .source
@@ -501,6 +523,7 @@ pub fn write_default_config(path: &Path, force: bool) -> Result<(), ConfigError>
 mod tests {
     use super::{
         load, resolve, write_default_config, FileConfig, Settings, DEFAULT_CONFIG_TEMPLATE,
+        MAX_GRAPH_LINES, MAX_INTERVAL_SECS, MAX_TTL_MS, MIN_TTL_MS,
     };
     use crate::cli::Cli;
     use crate::metrics::memory::MemoryMode;
@@ -596,6 +619,34 @@ mod tests {
         assert_eq!(settings.graph_lines, 12);
         assert_eq!(settings.mem_graph_lines, 4);
         assert_eq!(settings.token_options().mem_graph_lines, 4);
+    }
+
+    #[test]
+    fn a_file_cannot_escape_the_ranges_the_command_line_enforces() {
+        // clap range checks the command line; nothing range checks a file, so
+        // `resolve` has to.
+        let high: FileConfig =
+            toml::from_str("interval_secs = 100000\nttl_ms = 999999999\ngraph_lines = 400\n")
+                .expect("the file parses");
+        let settings = resolve(&parse(&[]), Some(high));
+        assert_eq!(settings.interval_secs, MAX_INTERVAL_SECS);
+        assert_eq!(settings.ttl_ms, MAX_TTL_MS);
+        assert_eq!(settings.graph_lines, MAX_GRAPH_LINES);
+        assert_eq!(settings.mem_graph_lines, MAX_GRAPH_LINES);
+
+        let low: FileConfig =
+            toml::from_str("interval_secs = 0\nttl_ms = 0\n").expect("the file parses");
+        let settings = resolve(&parse(&[]), Some(low));
+        assert_eq!(settings.interval_secs, 1);
+        assert_eq!(settings.ttl_ms, MIN_TTL_MS);
+    }
+
+    #[test]
+    fn a_long_interval_does_not_push_the_default_ttl_out_of_range() {
+        let settings = resolve(&parse(&["--interval", "3600"]), None);
+        assert_eq!(settings.interval_secs, MAX_INTERVAL_SECS);
+        assert_eq!(settings.ttl_ms, 7_201_000);
+        assert!(settings.ttl_ms <= MAX_TTL_MS);
     }
 
     #[test]

@@ -7,4 +7,6 @@
 
 pub mod cli;
 
-pub use cli::{report_metadata_args, HerdrCli, HerdrError, MetadataReport, WorkspaceInfo};
+pub use cli::{
+    report_metadata_args, HerdrCli, HerdrError, MetadataReport, WorkspaceInfo, COMMAND_TIMEOUT,
+};
