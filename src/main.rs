@@ -35,7 +35,8 @@
 //! * [`cli`](herdr_mem_cpu_load::cli) — the `tmux-mem-cpu-load` compatible
 //!   command line.
 //! * [`config`](herdr_mem_cpu_load::config) — the `config.toml` layer the
-//!   command line is merged over.
+//!   command line is merged over, and the watcher that re-runs the merge for
+//!   a running daemon when the file changes.
 //! * [`watch`](herdr_mem_cpu_load::watch) — the live status line the herdr
 //!   popup pane runs.
 
@@ -71,7 +72,12 @@ fn main() -> ExitCode {
     }
 
     if args.daemon.enabled {
-        daemon::run(&settings.daemon_options());
+        // The daemon outlives any number of edits to the file it started
+        // from, so it keeps watching that file and re-resolves the whole merge
+        // whenever it changes.
+        let mut watcher = config::ConfigWatcher::new(&args);
+        let mut reload = || watcher.poll().map(|settings| settings.daemon_options());
+        daemon::run(settings.daemon_options(), Some(&mut reload));
         return ExitCode::SUCCESS;
     }
 

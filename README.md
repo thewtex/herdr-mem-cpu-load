@@ -15,9 +15,9 @@ Space sidebar.
 ## Overview
 
 The daemon samples the machine every interval and reports a handful of Space
-sidebar tokens to each open workspace. Put the ones you want in
-`[ui.sidebar.spaces]` and the sidebar grows system rows that change colour as
-the machine heats up:
+sidebar tokens to each open workspace — or to the active one alone, with
+`workspaces = "focused"`. Put the ones you want in `[ui.sidebar.spaces]` and
+the sidebar grows system rows that change colour as the machine heats up:
 
 ```
 ┌─ Spaces ─────────────────────────────┐
@@ -222,6 +222,14 @@ A missing file is not an error. A file with an unknown key or an out-of-range
 value is reported on stderr, naming the file and the line, and then ignored, so
 a typo cannot silently kill the sidebar.
 
+The daemon watches the file it resolved its settings from and re-runs that
+merge whenever it changes, so an edit takes effect on the next tick rather than
+the next restart. Every key below can be changed under a running daemon. The
+command line still wins: a flag passed at startup cannot be taken away by
+editing the file underneath it. A file that stops parsing mid-save leaves the
+daemon on the settings it already has, and deleting the file falls back to the
+command line over the defaults.
+
 ### Keys
 
 | Key | Default | Meaning |
@@ -229,9 +237,11 @@ a typo cannot silently kill the sidebar.
 | `interval_secs` | `1` | Seconds between samples; also the CPU measurement window. 1 to 3600. |
 | `ttl_ms` | `interval_secs × 2000 + 1000` | How long herdr keeps the tokens without a refresh. 1 to 86400000, herdr's accepted range. Daemon only. |
 | `source` | `"system-monitor"` | The metadata source the tokens are reported under. Daemon only. |
+| `workspaces` | `"all"` | Which workspaces the rows appear under: `"all"`, or `"focused"` for the active one alone. Daemon only. |
 | `graph_style` | `"classic"`, `"blocks"` with `--daemon` | `"classic"`, `"blocks"`, or `"vertical"`. |
 | `graph_lines` | `10` | Cells in the CPU graph. `0` hides it, `64` is the maximum. |
 | `mem_graph_lines` | `graph_lines` | Cells in the memory bar. |
+| `load_graph_lines` | `graph_lines` | Cells in the load bar, which draws the one minute load per core. |
 | `mem_mode` | `0` | `0`: used/total, `1`: free memory, `2`: usage percent. |
 | `cpu_mode` | `0` | `0`: max 100%, `1`: max 100% per thread. |
 | `averages_count` | `3` | How many load averages to print, `0` to `3`. |
@@ -250,9 +260,11 @@ A complete file, all defaults spelled out:
 interval_secs = 1
 ttl_ms = 3000
 source = "system-monitor"
+workspaces = "all"
 graph_style = "classic"
 graph_lines = 10
 mem_graph_lines = 10
+load_graph_lines = 10
 mem_mode = 0
 cpu_mode = 0
 averages_count = 3
@@ -268,12 +280,17 @@ load_warn = 0.7
 load_hot = 1.0
 ```
 
-Nothing here has to be set. A file that only narrows the memory bar is a
-complete file:
+Nothing here has to be set. A file that only narrows the memory and load bars
+is a complete file:
 
 ```toml
 mem_graph_lines = 4
+load_graph_lines = 4
 ```
+
+Each of the three bars can be a different width; `mem_graph_lines` and
+`load_graph_lines` both fall back to `graph_lines` when they are not set, so
+setting `graph_lines` alone still moves all three together.
 
 ## One-line mode
 
@@ -286,6 +303,7 @@ herdr-mem-cpu-load [OPTIONS]
 | `-i`, `--interval <SECS>` | `1` | Status refresh interval in seconds; also the CPU sampling window. 1 to 3600. |
 | `-g`, `--graph-lines <N>` | `10` | Cells in the CPU graph. `0` hides the graph, `64` is the maximum. |
 | `--mem-graph-lines <N>` | `--graph-lines` | Cells in the memory bar. Daemon mode only; one-line mode draws no memory bar. |
+| `--load-graph-lines <N>` | `--graph-lines` | Cells in the load bar. Daemon mode only; one-line mode draws no load bar. |
 | `-m`, `--mem-mode <0\|1\|2>` | `0` | `0`: used/total, `1`: free memory, `2`: usage percent. |
 | `-t`, `--cpu-mode <0\|1>` | `0` | `0`: max 100%, `1`: max 100% per thread. |
 | `-a`, `--averages-count <0-3>` | `3` | How many load averages to print. |
@@ -305,6 +323,7 @@ herdr-mem-cpu-load [OPTIONS]
 | `--daemon` | off | Run as a herdr plugin daemon instead of printing one line. |
 | `--ttl-ms <N>` | `interval × 2 + 1000` | How long herdr keeps the reported tokens. Daemon mode only. |
 | `--source <ID>` | `system-monitor` | Metadata source the tokens are reported under. Daemon mode only. |
+| `--workspaces <all\|focused>` | `all` | Report to every open workspace, or to the active one alone. Daemon mode only. |
 | `--history <N>` | `--graph-lines` | Samples kept for the `$cpu_history` sparkline. Daemon mode only. |
 | `--log-file <PATH>` | – | Append daemon diagnostics here. Daemon mode only. |
 | `--verbose` | off | Log every tick's status line, not just errors. Daemon mode only. |
@@ -460,6 +479,21 @@ herdr-mem-cpu-load --daemon --log-file /tmp/mem-cpu-load.log &
 Add `--verbose` (or `verbose = true`) to log every tick's status line, not just
 errors.
 
+**The same rows repeat under every Space.** They are one machine's numbers, so
+by default every open workspace gets a copy. Report them to the active
+workspace instead:
+
+```toml
+workspaces = "focused"
+```
+
+The rows follow the focus: the workspace being left has its tokens cleared on
+the same tick the new one is given them, rather than keeping them until the
+TTL runs out. It is also one `herdr` call per tick instead of one per
+workspace. If herdr answers with no focused workspace at all — which happens
+while the focus is moving — the rows stay where they last were rather than
+blinking out.
+
 **Rows appear and then vanish.** The tokens have a TTL: herdr drops them if the
 daemon stops refreshing. The default is two intervals plus a second of slack,
 so a stopped daemon's rows disappear on their own within a few seconds. If the
@@ -489,8 +523,10 @@ herdr-mem-cpu-load --config /path/to/config.toml --print-config
 ```
 
 A malformed file is reported on stderr and then ignored; look for
-`herdr-mem-cpu-load: ignoring ...` in the plugin log. The daemon reads the file
-once at startup, so restart it after an edit.
+`herdr-mem-cpu-load: ignoring ...` in the plugin log. The daemon re-reads the
+file when it changes, so an edit lands within one interval and no restart is
+needed; `configuration reloaded: ...` in the daemon log is the confirmation.
+One-line and `--watch` mode read the file once, when they start.
 
 ## Publishing to the herdr marketplace
 

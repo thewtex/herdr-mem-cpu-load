@@ -17,6 +17,9 @@
 # An unknown key is an error naming this file and the line, and a file that
 # fails to parse is reported on stderr and then ignored, so a typo cannot take
 # the sidebar down with it.
+#
+# A running daemon re-reads this file whenever it changes, so an edit takes
+# effect on the next tick and there is nothing to restart.
 
 # Seconds between samples. Also the window the CPU percentage is measured over.
 # 1 to 3600; a value outside that range is clamped into it.
@@ -31,6 +34,14 @@
 # The metadata source the tokens are reported under. Daemon mode only.
 #source = "system-monitor"
 
+# Which workspaces the tokens are reported to. "all" gives every open
+# workspace its own copy of the rows; "focused" reports to the active
+# workspace alone, which is the one to pick when several Spaces are open and
+# the same machine-wide numbers repeated under each of them are noise. The
+# rows are taken off a workspace as soon as it stops being the active one.
+# Daemon mode only.
+#workspaces = "all"
+
 # The CPU graph: "classic" ([|||||     ]), "blocks" (unicode eighths), or
 # "vertical" (a single bar character). One-line mode defaults to "classic",
 # --daemon defaults to "blocks".
@@ -44,6 +55,11 @@
 # Cells in the memory bar. Defaults to graph_lines. Memory moves far less than
 # the CPU does, so a narrower bar often reads better in the sidebar.
 #mem_graph_lines = 10
+
+# Cells in the load bar, which draws the one minute load per core clamped to
+# one saturated machine. Defaults to graph_lines. Daemon mode only: the
+# one-line format prints the load averages without a bar.
+#load_graph_lines = 10
 
 # Memory display. 0: used/total, 1: free memory, 2: usage percent.
 #mem_mode = 0

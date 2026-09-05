@@ -1,5 +1,5 @@
 //! Daemon mode: sample on an interval and report Space sidebar tokens for
-//! every open workspace.
+//! every open workspace, or for the active one alone — see [`WorkspaceScope`].
 //!
 //! The loop is deliberately quiet. herdr copies a plugin's stdout and stderr
 //! into a capped command log, so a process that printed a line every two
@@ -11,12 +11,16 @@
 pub mod lock;
 
 use std::collections::VecDeque;
+use std::fmt;
 use std::fs::OpenOptions;
 use std::io::Write;
 use std::path::PathBuf;
+use std::str::FromStr;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
-use crate::herdr::{HerdrCli, MetadataReport};
+use serde::{Deserialize, Serialize};
+
+use crate::herdr::{HerdrCli, MetadataReport, WorkspaceInfo};
 #[cfg(windows)]
 use crate::metrics::load_emulator::LoadEmulator;
 use crate::metrics::{self, cpu::CpuSampler};
@@ -31,6 +35,45 @@ pub const DEFAULT_INTERVAL: Duration = Duration::from_secs(2);
 /// The log file name used under `HERDR_PLUGIN_STATE_DIR`.
 pub const LOG_FILE_NAME: &str = "daemon.log";
 
+/// Which workspaces a tick's tokens go to.
+///
+/// The readings are the whole machine's, so reporting them to every open
+/// workspace repeats the same three rows down the sidebar.
+/// [`Focused`](Self::Focused) puts them under the active workspace alone,
+/// which is also one `herdr` call a tick rather than one per workspace.
+#[derive(Clone, Copy, Debug, Default, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum WorkspaceScope {
+    /// Every open workspace.
+    #[default]
+    All,
+    /// The focused workspace only.
+    Focused,
+}
+
+impl FromStr for WorkspaceScope {
+    type Err = String;
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        match value.to_ascii_lowercase().as_str() {
+            "all" => Ok(Self::All),
+            "focused" => Ok(Self::Focused),
+            other => Err(format!(
+                "invalid workspace scope `{other}`, expected all or focused"
+            )),
+        }
+    }
+}
+
+impl fmt::Display for WorkspaceScope {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(match self {
+            Self::All => "all",
+            Self::Focused => "focused",
+        })
+    }
+}
+
 /// How the daemon samples and reports.
 #[derive(Clone, Debug, PartialEq)]
 pub struct DaemonOptions {
@@ -41,6 +84,8 @@ pub struct DaemonOptions {
     pub ttl_ms: u64,
     /// The metadata source id every report is attributed to.
     pub source: String,
+    /// Which workspaces the tokens are reported to.
+    pub workspaces: WorkspaceScope,
     /// What the tokens look like.
     pub tokens: TokenOptions,
     /// How many CPU samples the `cpu_history` sparkline keeps.
@@ -59,6 +104,7 @@ impl Default for DaemonOptions {
             interval: DEFAULT_INTERVAL,
             ttl_ms: default_ttl_ms(DEFAULT_INTERVAL),
             source: "system-monitor".to_string(),
+            workspaces: WorkspaceScope::All,
             tokens: TokenOptions::default(),
             history_len: TokenOptions::default().graph_lines,
             max_failures: DEFAULT_MAX_FAILURES,
@@ -152,6 +198,18 @@ impl History {
             self.values.pop_front();
         }
         self.values.push_back(value);
+    }
+
+    /// Change the capacity, keeping the newest values that still fit.
+    ///
+    /// A configuration reload must not blank the sparkline, so growing the
+    /// ring keeps everything and shrinking it drops the oldest samples, the
+    /// same ones the next few [`push`](Self::push) calls would have dropped.
+    pub fn resize(&mut self, capacity: usize) {
+        self.capacity = capacity;
+        while self.values.len() > capacity {
+            self.values.pop_front();
+        }
     }
 
     /// The retained values, oldest first.
@@ -264,8 +322,8 @@ enum Flow {
 }
 
 /// The daemon's mutable state, kept together so a tick is one method call.
-struct Daemon<'a> {
-    options: &'a DaemonOptions,
+struct Daemon {
+    options: DaemonOptions,
     logger: Logger,
     cli: HerdrCli,
     sampler: CpuSampler,
@@ -278,23 +336,53 @@ struct Daemon<'a> {
     /// The level each metric was last reported at, so a metric sitting on a
     /// threshold does not repaint its sidebar row every tick.
     levels: LevelTracker,
+    /// The workspaces the previous tick reported to, so the ones that drop out
+    /// of the target list can have their rows taken away.
+    reported: Vec<String>,
     failures: u32,
 }
 
-impl<'a> Daemon<'a> {
-    fn new(options: &'a DaemonOptions) -> Self {
+impl Daemon {
+    fn new(options: DaemonOptions) -> Self {
         Self {
-            options,
-            logger: Logger::new(options),
+            logger: Logger::new(&options),
             cli: HerdrCli::from_env(),
             sampler: CpuSampler::new(),
             history: History::new(options.history_len),
+            options,
             load: LoadSource::detect(),
             last_load_update: None,
             seq: SeqGenerator::default(),
             levels: LevelTracker::new(),
+            reported: Vec::new(),
             failures: 0,
         }
+    }
+
+    /// Swap in freshly resolved options mid-run.
+    ///
+    /// Everything a configuration file can set takes effect on the next tick.
+    /// The history ring is resized rather than rebuilt so a changed `history`
+    /// does not blank the sparkline, and the level tracker is left alone: it
+    /// is handed the thresholds on every tick, so new ones apply on their own
+    /// without discarding the hysteresis a running sidebar depends on.
+    ///
+    /// An edit that changes nothing the daemon reads — a comment, or a `touch`
+    /// — is not worth a log line, so identical options are dropped here rather
+    /// than announced.
+    fn reconfigure(&mut self, options: DaemonOptions) {
+        if options == self.options {
+            return;
+        }
+        self.history.resize(options.history_len);
+        self.logger.log(&format!(
+            "configuration reloaded: interval {} ms, ttl {} ms, source {}, history {}",
+            options.interval.as_millis(),
+            options.ttl_ms,
+            options.source,
+            options.history_len,
+        ));
+        self.options = options;
     }
 
     /// Sample, report, and say whether to keep going.
@@ -351,27 +439,67 @@ impl<'a> Daemon<'a> {
             }
         };
 
+        let targets = self.targets(&workspaces);
+
         if self.options.verbose {
             self.logger.log(&format!(
-                "{} ({} workspace(s))",
+                "{} ({} of {} workspace(s))",
                 status_line(&sample, &self.options.tokens.render_options()),
+                targets.len(),
                 workspaces.len()
             ));
         }
 
         let seq = self.seq.next_seq();
-        for workspace in &workspaces {
-            let report = self.report_for(&workspace.workspace_id, &tokens, seq);
+        // A workspace that carried the rows last tick and is not a target now
+        // has them taken away rather than left to time out, so moving to
+        // another Space does not leave stale numbers up for a whole ttl.
+        for stale in stale_targets(&self.reported, &targets, &workspaces) {
+            let report = self.clear_report(stale, &tokens, seq);
+            if let Err(error) = self.cli.report_metadata(&report) {
+                self.logger
+                    .log(&format!("clearing {stale} failed: {error}"));
+            }
+        }
+        for workspace_id in &targets {
+            let report = self.report_for(workspace_id, &tokens, seq);
             // A workspace can close between the list and the report; that is
             // one lost row, not a reason to stop.
             if let Err(error) = self.cli.report_metadata(&report) {
-                self.logger.log(&format!(
-                    "reporting to {} failed: {error}",
-                    workspace.workspace_id
-                ));
+                self.logger
+                    .log(&format!("reporting to {workspace_id} failed: {error}"));
             }
         }
+        self.reported = targets;
         Flow::Continue
+    }
+
+    /// The workspaces this tick reports to.
+    ///
+    /// [`WorkspaceScope::Focused`] normally resolves to the one workspace
+    /// herdr marks as focused. A list that marks none — herdr answering while
+    /// the focus is moving, or a window that has lost it altogether — keeps
+    /// the workspace the last tick reported to, as long as it is still open,
+    /// so the rows hold still instead of blinking out and coming back.
+    fn targets(&self, workspaces: &[WorkspaceInfo]) -> Vec<String> {
+        match self.options.workspaces {
+            WorkspaceScope::All => workspaces
+                .iter()
+                .map(|workspace| workspace.workspace_id.clone())
+                .collect(),
+            WorkspaceScope::Focused => workspaces
+                .iter()
+                .find(|workspace| workspace.focused)
+                .map(|workspace| workspace.workspace_id.clone())
+                .or_else(|| {
+                    self.reported
+                        .iter()
+                        .find(|id| is_open(workspaces, id))
+                        .cloned()
+                })
+                .into_iter()
+                .collect(),
+        }
     }
 
     /// Hand this tick's reading to the load source, measuring the real gap
@@ -388,6 +516,20 @@ impl<'a> Daemon<'a> {
             .update(metrics::busy_cores(cpu_percent, sys::cpu_count()), dt);
     }
 
+    /// A report that takes every token this daemon publishes back off a
+    /// workspace, so its rows go the moment it stops being a target rather
+    /// than when the ttl runs out.
+    fn clear_report(&self, workspace_id: &str, tokens: &TokenSet, seq: u64) -> MetadataReport {
+        MetadataReport {
+            workspace_id: workspace_id.to_string(),
+            source: self.options.source.clone(),
+            set: Vec::new(),
+            clear: tokens.keys(),
+            ttl_ms: self.options.ttl_ms,
+            seq,
+        }
+    }
+
     fn report_for(&self, workspace_id: &str, tokens: &TokenSet, seq: u64) -> MetadataReport {
         MetadataReport {
             workspace_id: workspace_id.to_string(),
@@ -400,14 +542,51 @@ impl<'a> Daemon<'a> {
     }
 }
 
+/// Whether `workspace_id` is one of the open workspaces.
+fn is_open(workspaces: &[WorkspaceInfo], workspace_id: &str) -> bool {
+    workspaces
+        .iter()
+        .any(|workspace| workspace.workspace_id == workspace_id)
+}
+
+/// The workspaces that carried the tokens last tick, are still open, and are
+/// not being reported to now.
+///
+/// A workspace that has closed is left out: its metadata went with it, and the
+/// report would only fail.
+fn stale_targets<'a>(
+    reported: &'a [String],
+    targets: &[String],
+    workspaces: &[WorkspaceInfo],
+) -> Vec<&'a str> {
+    reported
+        .iter()
+        .map(String::as_str)
+        .filter(|id| !targets.iter().any(|target| target == id) && is_open(workspaces, id))
+        .collect()
+}
+
+/// A source of fresh options for a running daemon, called once a tick.
+///
+/// Returning `Some` reconfigures the daemon before the tick that follows;
+/// returning `None` leaves it as it is. The daemon deliberately knows nothing
+/// about where the options come from — [`crate::config::ConfigWatcher`] is
+/// what supplies them, and it owns every question about merge order and file
+/// parsing.
+pub type Reload<'a> = &'a mut dyn FnMut() -> Option<DaemonOptions>;
+
 /// Run the sampler until herdr goes away.
+///
+/// `reload` is polled at the top of every tick, so a configuration edit is
+/// picked up within one interval; pass `None` to pin the daemon to the options
+/// it started with.
 ///
 /// Returns once the server is gone: either its socket vanished or
 /// `workspace list` failed `max_failures` times in a row. Both are ordinary
 /// shutdowns, not errors — and so is finding another daemon already running,
 /// which happens every time herdr hands off to a new server and re-runs the
 /// `[[startup]]` hooks.
-pub fn run(options: &DaemonOptions) {
+pub fn run(options: DaemonOptions, mut reload: Option<Reload<'_>>) {
     let mut daemon = Daemon::new(options);
 
     let path = lock::lock_path();
@@ -433,20 +612,28 @@ pub fn run(options: &DaemonOptions) {
     daemon.logger.log(&format!(
         "herdr-mem-cpu-load {} started: interval {} ms, ttl {} ms, source {}, history {}",
         env!("CARGO_PKG_VERSION"),
-        options.interval.as_millis(),
-        options.ttl_ms,
-        options.source,
-        options.history_len,
+        daemon.options.interval.as_millis(),
+        daemon.options.ttl_ms,
+        daemon.options.source,
+        daemon.options.history_len,
     ));
 
     loop {
         let started = Instant::now();
+        // Before the sample, so an edit applies to the very next reading
+        // rather than the one after it.
+        if let Some(reload) = reload.as_mut() {
+            if let Some(next) = reload() {
+                daemon.reconfigure(next);
+            }
+        }
         if daemon.tick() == Flow::Stop {
             return;
         }
         // Measure the sleep from the start of the tick so the cost of talking
-        // to herdr does not make the schedule drift.
-        if let Some(rest) = options.interval.checked_sub(started.elapsed()) {
+        // to herdr does not make the schedule drift. A reload that shortened
+        // the interval takes effect here, on the tick it arrived for.
+        if let Some(rest) = daemon.options.interval.checked_sub(started.elapsed()) {
             std::thread::sleep(rest);
         }
     }
@@ -502,9 +689,152 @@ fn civil_from_days(days: u64) -> (u64, u64, u64) {
 
 #[cfg(test)]
 mod tests {
-    use super::{default_ttl_ms, format_timestamp, DaemonOptions, History, SeqGenerator};
+    use super::{
+        default_ttl_ms, format_timestamp, stale_targets, Daemon, DaemonOptions, History,
+        SeqGenerator, WorkspaceScope,
+    };
+    use crate::herdr::WorkspaceInfo;
     use std::cell::Cell;
+    use std::path::PathBuf;
     use std::time::Duration;
+
+    fn temp_path(name: &str) -> PathBuf {
+        let mut path = std::env::temp_dir();
+        path.push(format!(
+            "herdr-mem-cpu-load-daemon-test-{}-{name}",
+            std::process::id()
+        ));
+        path
+    }
+
+    fn workspace(id: &str, focused: bool) -> WorkspaceInfo {
+        WorkspaceInfo {
+            workspace_id: id.to_string(),
+            focused,
+            ..WorkspaceInfo::default()
+        }
+    }
+
+    fn daemon_with(scope: WorkspaceScope) -> Daemon {
+        Daemon::new(DaemonOptions {
+            workspaces: scope,
+            ..DaemonOptions::default()
+        })
+    }
+
+    #[test]
+    fn the_workspace_scope_parses_case_insensitively() {
+        assert_eq!("all".parse(), Ok(WorkspaceScope::All));
+        assert_eq!("FOCUSED".parse(), Ok(WorkspaceScope::Focused));
+        assert_eq!("Focused".parse(), Ok(WorkspaceScope::Focused));
+        assert!("everything".parse::<WorkspaceScope>().is_err());
+        assert_eq!(WorkspaceScope::default(), WorkspaceScope::All);
+    }
+
+    #[test]
+    fn the_workspace_scope_prints_what_a_config_file_would_write() {
+        // `--print-config` writes this back out through serde, so the two
+        // spellings have to agree: what `Display` prints must parse back.
+        for scope in [WorkspaceScope::All, WorkspaceScope::Focused] {
+            let printed = scope.to_string();
+            assert_eq!(printed.parse(), Ok(scope));
+            assert_eq!(
+                toml::to_string(&FileScope { workspaces: scope })
+                    .expect("the scope serialises")
+                    .trim(),
+                format!("workspaces = \"{printed}\"")
+            );
+        }
+    }
+
+    /// A one-key stand-in for the `workspaces` line of a `config.toml`.
+    #[derive(serde::Serialize)]
+    struct FileScope {
+        workspaces: WorkspaceScope,
+    }
+
+    #[test]
+    fn every_open_workspace_is_a_target_by_default() {
+        let daemon = daemon_with(WorkspaceScope::All);
+        let workspaces = [workspace("w1", false), workspace("w9", true)];
+
+        assert_eq!(daemon.targets(&workspaces), vec!["w1", "w9"]);
+    }
+
+    #[test]
+    fn the_focused_scope_reports_to_the_active_workspace_alone() {
+        let daemon = daemon_with(WorkspaceScope::Focused);
+        let workspaces = [workspace("w1", false), workspace("w9", true)];
+
+        assert_eq!(daemon.targets(&workspaces), vec!["w9"]);
+    }
+
+    #[test]
+    fn a_list_with_nothing_focused_keeps_the_workspace_already_reported_to() {
+        let mut daemon = daemon_with(WorkspaceScope::Focused);
+        let workspaces = [workspace("w1", false), workspace("w9", false)];
+
+        // Nothing has been reported yet, so there is nothing to hold on to.
+        assert!(daemon.targets(&workspaces).is_empty());
+
+        // Once a workspace has the rows, an answer that marks no focus leaves
+        // them where they are rather than blinking them out.
+        daemon.reported = vec!["w9".to_string()];
+        assert_eq!(daemon.targets(&workspaces), vec!["w9"]);
+
+        // Unless that workspace has closed in the meantime.
+        daemon.reported = vec!["w4".to_string()];
+        assert!(daemon.targets(&workspaces).is_empty());
+    }
+
+    #[test]
+    fn the_workspace_left_behind_is_cleared_rather_than_left_to_expire() {
+        let workspaces = [workspace("w1", true), workspace("w9", false)];
+        let reported = vec!["w9".to_string(), "w4".to_string()];
+        let targets = vec!["w1".to_string()];
+
+        // w9 had the rows and no longer should; w4 has closed, and its
+        // metadata went with it.
+        assert_eq!(stale_targets(&reported, &targets, &workspaces), vec!["w9"]);
+        // A workspace that is still a target keeps what it has.
+        assert!(stale_targets(&targets, &targets, &workspaces).is_empty());
+    }
+
+    #[test]
+    fn a_clear_report_takes_off_every_token_a_normal_one_sets() {
+        use crate::metrics::{LoadAverages, MemoryStatus, Sample};
+        use crate::tokens::{build_tokens, LevelTracker, TokenOptions};
+
+        let daemon = daemon_with(WorkspaceScope::Focused);
+        let sample = Sample {
+            cpu_percent: 51.2,
+            memory: MemoryStatus {
+                used_bytes: 2885 * 1024 * 1024,
+                total_bytes: 7987 * 1024 * 1024,
+            },
+            load: LoadAverages {
+                one: 2.11,
+                five: 2.35,
+                fifteen: 2.44,
+            },
+            cpu_count: 8,
+        };
+        let tokens = build_tokens(
+            &sample,
+            &[10.0, 20.0],
+            &TokenOptions::default(),
+            &mut LevelTracker::new(),
+        );
+        let clear = daemon.clear_report("w9", &tokens, 7);
+
+        assert!(clear.set.is_empty());
+        assert_eq!(clear.clear.len(), tokens.mentioned_keys());
+        for (key, _) in &tokens.set {
+            assert!(clear.clear.contains(key), "{key} is not cleared");
+        }
+        assert_eq!(clear.workspace_id, "w9");
+        assert_eq!(clear.seq, 7);
+    }
 
     #[test]
     fn sequence_numbers_increase_even_when_the_clock_is_frozen() {
@@ -530,6 +860,70 @@ mod tests {
         // A clock step backwards must not let herdr reject the report.
         now.set(1_600_000_000_000);
         assert_eq!(seq.next_seq(), 1_700_000_002_001);
+    }
+
+    #[test]
+    fn resizing_the_history_ring_keeps_the_newest_values() {
+        let mut history = History::new(5);
+        for value in [1.0, 2.0, 3.0, 4.0, 5.0] {
+            history.push(value);
+        }
+
+        // Shrinking drops the oldest, not the sparkline.
+        history.resize(3);
+        assert_eq!(history.snapshot(), vec![3.0, 4.0, 5.0]);
+        // And the smaller capacity is the one that holds from here on.
+        history.push(6.0);
+        assert_eq!(history.snapshot(), vec![4.0, 5.0, 6.0]);
+
+        // Growing keeps everything and makes room for more.
+        history.resize(5);
+        assert_eq!(history.snapshot(), vec![4.0, 5.0, 6.0]);
+        history.push(7.0);
+        history.push(8.0);
+        assert_eq!(history.snapshot(), vec![4.0, 5.0, 6.0, 7.0, 8.0]);
+
+        // Zero clears it, which is what clears the `cpu_history` token.
+        history.resize(0);
+        assert!(history.is_empty());
+        history.push(9.0);
+        assert!(history.is_empty());
+    }
+
+    #[test]
+    fn reconfiguring_swaps_the_options_and_resizes_the_history() {
+        let log = temp_path("reconfigure.log");
+        std::fs::remove_file(&log).ok();
+
+        let options = DaemonOptions {
+            history_len: 5,
+            log: Some(log.clone()),
+            ..DaemonOptions::default()
+        };
+        let mut daemon = Daemon::new(options.clone());
+        for value in [1.0, 2.0, 3.0, 4.0, 5.0] {
+            daemon.history.push(value);
+        }
+
+        // An edit that changes nothing is not a reconfiguration.
+        daemon.reconfigure(options.clone());
+        assert_eq!(daemon.options, options);
+        assert!(!log.exists(), "an identical reload must not log");
+
+        let next = DaemonOptions {
+            interval: Duration::from_secs(4),
+            history_len: 2,
+            ..options
+        };
+        daemon.reconfigure(next.clone());
+        assert_eq!(daemon.options, next);
+        assert_eq!(daemon.history.snapshot(), vec![4.0, 5.0]);
+
+        let written = std::fs::read_to_string(&log).expect("the reload was logged");
+        std::fs::remove_file(&log).ok();
+        assert!(written.contains("configuration reloaded"), "{written}");
+        assert!(written.contains("interval 4000 ms"), "{written}");
+        assert!(written.contains("history 2"), "{written}");
     }
 
     #[test]

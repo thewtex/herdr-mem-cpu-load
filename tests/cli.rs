@@ -333,8 +333,13 @@ fn write_fake_herdr(dir: &TempDir, log: &Path, code: i32) -> PathBuf {
 }
 
 fn spawn_daemon(dir: &TempDir, fake: &Path) -> Child {
+    spawn_daemon_with(dir, fake, &[])
+}
+
+fn spawn_daemon_with(dir: &TempDir, fake: &Path, extra: &[&str]) -> Child {
     command(dir)
         .args(["--daemon", "--interval", "1"])
+        .args(extra)
         .env("HERDR_BIN_PATH", fake)
         .stdout(Stdio::null())
         .stderr(Stdio::null())
@@ -393,6 +398,125 @@ fn the_daemon_reports_tokens_for_every_workspace() {
         // The level tokens that do not apply are cleared rather than set.
         assert!(call.contains("--clear-token"), "{call}");
     }
+}
+
+#[test]
+fn the_focused_scope_reports_to_the_active_workspace_alone() {
+    let dir = TempDir::new("daemon-focused");
+    let log = dir.join("argv.log");
+    let fake = write_fake_herdr(&dir, &log, 0);
+
+    let mut daemon = spawn_daemon_with(&dir, &fake, &["--workspaces", "focused"]);
+    std::thread::sleep(Duration::from_secs(3));
+    daemon.kill().expect("the daemon is killed");
+    daemon.wait().expect("the daemon is reaped");
+
+    let calls = recorded(&log);
+    let reports: Vec<&String> = calls
+        .iter()
+        .filter(|call| call.contains("report-metadata"))
+        .collect();
+    assert!(
+        !reports.is_empty(),
+        "the daemon reported nothing: {calls:?}"
+    );
+
+    // w9 is the focused workspace in WORKSPACE_LIST; w1 never hears from the
+    // daemon at all.
+    for report in &reports {
+        assert!(report.contains(" w9 "), "{report}");
+        assert!(
+            !report.contains(" w1 "),
+            "an unfocused workspace was reported to: {report}"
+        );
+    }
+    assert!(
+        reports.iter().any(|report| report.contains("cpu_status=")),
+        "the focused workspace got no tokens: {reports:?}"
+    );
+}
+
+/// One `--set-token`'s value: everything after `<key>=` up to the next flag.
+///
+/// A token value never contains ` --`, so the next flag is where it ends. The
+/// fake herdr records one invocation per line with the arguments run together,
+/// which is the only reason this has to be picked apart at all.
+fn token_value(call: &str, key: &str) -> Option<String> {
+    let marker = format!("{key}=");
+    let start = call.find(&marker)? + marker.len();
+    let rest = &call[start..];
+    let end = rest.find(" --").unwrap_or(rest.len());
+    Some(rest[..end].trim_end().to_string())
+}
+
+/// The number of cells in the framed bar a token value opens with.
+///
+/// The closing frame character doubles as the one-eighth block, so the bar
+/// ends at the *last* one in the value rather than the first; the reading that
+/// follows the bar never contains it.
+fn bar_cells(value: &str) -> Option<usize> {
+    let inner = value.strip_prefix(FRAME_LEFT)?;
+    let end = inner.rfind(FRAME_RIGHT)?;
+    Some(inner[..end].chars().count())
+}
+
+/// Wait for a report whose CPU bar is `cells` wide, and return whether one
+/// arrived inside `budget`.
+fn wait_for_cpu_bar(log: &Path, cells: usize, budget: Duration) -> bool {
+    let started = Instant::now();
+    loop {
+        let seen = recorded(log).iter().any(|call| {
+            token_value(call, "cpu_status")
+                .and_then(|value| bar_cells(&value))
+                .is_some_and(|width| width == cells)
+        });
+        if seen {
+            return true;
+        }
+        if started.elapsed() > budget {
+            return false;
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    }
+}
+
+#[test]
+fn the_daemon_picks_up_a_configuration_edit_without_restarting() {
+    let dir = TempDir::new("daemon-reload");
+    let log = dir.join("argv.log");
+    let fake = write_fake_herdr(&dir, &log, 0);
+    // `command` points HERDR_PLUGIN_CONFIG_DIR at this directory, so this is
+    // the file the daemon resolves its settings from.
+    let config = dir.join("config.toml");
+    std::fs::write(&config, "graph_lines = 2\n").expect("the config is written");
+
+    let mut daemon = spawn_daemon(&dir, &fake);
+    // The first tick only establishes the CPU baseline, so the first report
+    // lands on the second one.
+    let budget = Duration::from_secs(15);
+    let narrow = wait_for_cpu_bar(&log, 2, budget);
+    if !narrow {
+        daemon.kill().ok();
+        daemon.wait().ok();
+        panic!(
+            "no report with the configured 2 cell bar: {:?}",
+            recorded(&log)
+        );
+    }
+
+    // The edit a running daemon used to need a restart for. A different length
+    // as well as a different mtime, so it is noticed whatever the filesystem's
+    // timestamp granularity.
+    std::fs::write(&config, "graph_lines = 20\n").expect("the config is rewritten");
+    let widened = wait_for_cpu_bar(&log, 20, budget);
+
+    daemon.kill().expect("the daemon is killed");
+    daemon.wait().expect("the daemon is reaped");
+    assert!(
+        widened,
+        "the daemon never picked up the edit: {:?}",
+        recorded(&log)
+    );
 }
 
 #[test]

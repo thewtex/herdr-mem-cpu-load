@@ -10,6 +10,7 @@ use std::path::{Path, PathBuf};
 use clap::{Args, Parser};
 
 use crate::config::{self, Settings, MAX_GRAPH_LINES, MAX_INTERVAL_SECS, MAX_TTL_MS, MIN_TTL_MS};
+use crate::daemon::WorkspaceScope;
 use crate::metrics::memory::MemoryMode;
 use crate::metrics::CpuMode;
 use crate::render::graph::GraphStyle;
@@ -41,6 +42,10 @@ pub struct Cli {
     /// How many cells the memory bar is drawn with. [default: --graph-lines]
     #[arg(long, value_name = "N", value_parser = parse_graph_lines)]
     pub mem_graph_lines: Option<usize>,
+
+    /// How many cells the load bar is drawn with. [default: --graph-lines]
+    #[arg(long, value_name = "N", value_parser = parse_graph_lines)]
+    pub load_graph_lines: Option<usize>,
 
     /// Memory display mode. 0: used/total, 1: free memory, 2: usage percent.
     /// [default: 0]
@@ -124,6 +129,11 @@ pub struct DaemonFlags {
     /// [default: system-monitor]
     #[arg(long, value_name = "ID")]
     pub source: Option<String>,
+
+    /// Which workspaces the tokens go to: all, or focused for the active
+    /// workspace alone. [default: all]
+    #[arg(long, value_name = "all|focused")]
+    pub workspaces: Option<WorkspaceScope>,
 
     /// How many samples the CPU history sparkline keeps.
     /// [default: --graph-lines]
@@ -226,6 +236,7 @@ impl Cli {
 #[cfg(test)]
 mod tests {
     use super::Cli;
+    use crate::daemon::WorkspaceScope;
     use crate::metrics::memory::MemoryMode;
     use crate::metrics::CpuMode;
     use crate::render::colors::{ColorMode, PowerlineMode};
@@ -278,6 +289,7 @@ mod tests {
             vec!["-m", "3"],
             vec!["-t", "2"],
             vec!["--graph-style", "spiral"],
+            vec!["--workspaces", "everything"],
             vec!["-l", "256"],
             vec!["--ttl-ms", "0"],
         ] {
@@ -323,6 +335,7 @@ mod tests {
         assert_eq!(options.interval, Duration::from_secs(1));
         assert_eq!(options.ttl_ms, 3000);
         assert_eq!(options.source, "system-monitor");
+        assert_eq!(options.workspaces, WorkspaceScope::All);
         assert_eq!(options.history_len, 10);
         assert!(!options.verbose);
         assert_eq!(options.log, None);
@@ -353,6 +366,12 @@ mod tests {
         assert_eq!(options.interval, Duration::from_secs(2));
         assert_eq!(options.ttl_ms, 9000);
         assert_eq!(options.source, "my-monitor");
+        assert_eq!(
+            settings(&["--daemon", "--workspaces", "focused"])
+                .daemon_options()
+                .workspaces,
+            WorkspaceScope::Focused
+        );
         assert_eq!(options.history_len, 24);
         assert!(options.verbose);
         assert_eq!(

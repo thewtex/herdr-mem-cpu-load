@@ -19,12 +19,12 @@
 use std::fmt;
 use std::io::IsTerminal;
 use std::path::{Path, PathBuf};
-use std::time::Duration;
+use std::time::{Duration, SystemTime};
 
 use serde::{Deserialize, Serialize};
 
 use crate::cli::Cli;
-use crate::daemon::{default_ttl_ms, DaemonOptions, DEFAULT_MAX_FAILURES};
+use crate::daemon::{default_ttl_ms, DaemonOptions, WorkspaceScope, DEFAULT_MAX_FAILURES};
 use crate::metrics::cpu::sampling_delay;
 use crate::metrics::memory::MemoryMode;
 use crate::metrics::CpuMode;
@@ -79,6 +79,9 @@ pub struct FileConfig {
     /// The metadata source the tokens are reported under.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub source: Option<String>,
+    /// Which workspaces the daemon reports to: `all` or `focused`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub workspaces: Option<WorkspaceScope>,
     /// `classic`, `blocks`, or `vertical`.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub graph_style: Option<GraphStyle>,
@@ -88,6 +91,9 @@ pub struct FileConfig {
     /// Cells in the memory bar. Defaults to `graph_lines`.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub mem_graph_lines: Option<usize>,
+    /// Cells in the load bar. Defaults to `graph_lines`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub load_graph_lines: Option<usize>,
     /// 0: used/total, 1: free memory, 2: usage percent.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub mem_mode: Option<MemoryMode>,
@@ -238,6 +244,81 @@ pub fn load_or_warn(explicit: Option<&Path>) -> Option<FileConfig> {
     }
 }
 
+/// What the watcher compares between ticks to decide whether a file changed.
+///
+/// The modification time is the real signal; the length rides along because a
+/// file rewritten twice inside one filesystem timestamp tick keeps its mtime,
+/// and a same-tick edit that changes the size is still worth noticing.
+/// `None` means the file is not there.
+type Fingerprint = Option<(SystemTime, u64)>;
+
+/// The current fingerprint of `path`.
+fn fingerprint(path: &Path) -> Fingerprint {
+    let metadata = std::fs::metadata(path).ok()?;
+    Some((metadata.modified().ok()?, metadata.len()))
+}
+
+/// Watches the configuration file so a running daemon can pick up an edit
+/// without being restarted.
+///
+/// The file is stat'd once a tick and parsed again only when its fingerprint
+/// moves, so the steady state costs one `stat` per interval and no parsing at
+/// all. A reload re-runs the same [`resolve`] merge the process started from,
+/// which means the command line still wins: a flag the user passed cannot be
+/// taken away by editing the file underneath it.
+pub struct ConfigWatcher<'a> {
+    cli: &'a Cli,
+    path: Option<PathBuf>,
+    seen: Fingerprint,
+}
+
+impl<'a> ConfigWatcher<'a> {
+    /// A watcher over the file `cli` resolved its settings from.
+    ///
+    /// The file as it stands now counts as already seen, so the first
+    /// [`poll`](Self::poll) reports a change only if one has happened since
+    /// the process started.
+    #[must_use]
+    pub fn new(cli: &'a Cli) -> Self {
+        let path = config_path(cli.config_path());
+        let seen = path.as_deref().and_then(fingerprint);
+        Self { cli, path, seen }
+    }
+
+    /// The file being watched, if this run has one at all.
+    #[must_use]
+    pub fn path(&self) -> Option<&Path> {
+        self.path.as_deref()
+    }
+
+    /// The settings to switch to, or `None` when nothing has changed.
+    ///
+    /// A file that appears, changes, or is deleted all count as a change;
+    /// deleting one falls back to the command line over the defaults, which is
+    /// what starting without a file would have done.
+    ///
+    /// A file that does not parse is reported and then ignored, leaving the
+    /// caller on the settings it already has. That is the one place a reload
+    /// deliberately differs from startup: reverting a live sidebar to the
+    /// defaults over a typo, or over a half-written file caught mid-save, is
+    /// worse than waiting for the next edit that parses.
+    pub fn poll(&mut self) -> Option<Settings> {
+        let path = self.path.as_deref()?;
+        let current = fingerprint(path);
+        if current == self.seen {
+            return None;
+        }
+        self.seen = current;
+        match load(path) {
+            Ok(file) => Some(resolve(self.cli, file)),
+            Err(error) => {
+                eprintln!("herdr-mem-cpu-load: ignoring {error}");
+                None
+            }
+        }
+    }
+}
+
 /// Every option, fully resolved: what [`crate::daemon::run`], one-line mode,
 /// and `--watch` all read.
 #[derive(Clone, Debug, PartialEq)]
@@ -245,9 +326,12 @@ pub struct Settings {
     pub interval_secs: u64,
     pub ttl_ms: u64,
     pub source: String,
+    /// Which workspaces daemon mode reports to.
+    pub workspaces: WorkspaceScope,
     pub graph_style: GraphStyle,
     pub graph_lines: usize,
     pub mem_graph_lines: usize,
+    pub load_graph_lines: usize,
     pub mem_mode: MemoryMode,
     pub cpu_mode: CpuMode,
     pub averages_count: u8,
@@ -271,9 +355,11 @@ impl Default for Settings {
             interval_secs: DEFAULT_INTERVAL_SECS,
             ttl_ms: default_ttl_ms(interval),
             source: DEFAULT_SOURCE.to_string(),
+            workspaces: WorkspaceScope::All,
             graph_style: GraphStyle::Classic,
             graph_lines: DEFAULT_GRAPH_LINES,
             mem_graph_lines: DEFAULT_GRAPH_LINES,
+            load_graph_lines: DEFAULT_GRAPH_LINES,
             mem_mode: MemoryMode::Default,
             cpu_mode: CpuMode::Default,
             averages_count: DEFAULT_AVERAGES_COUNT,
@@ -325,6 +411,7 @@ impl Settings {
             graph_style: self.graph_style,
             graph_lines: self.graph_lines,
             mem_graph_lines: self.mem_graph_lines,
+            load_graph_lines: self.load_graph_lines,
             mem_mode: self.mem_mode,
             cpu_mode: self.cpu_mode,
             averages_count: self.averages_count,
@@ -339,6 +426,7 @@ impl Settings {
             interval: self.interval(),
             ttl_ms: self.ttl_ms,
             source: self.source.clone(),
+            workspaces: self.workspaces,
             tokens: self.token_options(),
             history_len: self.history_len,
             max_failures: DEFAULT_MAX_FAILURES,
@@ -355,9 +443,11 @@ impl Settings {
             interval_secs: Some(self.interval_secs),
             ttl_ms: Some(self.ttl_ms),
             source: Some(self.source.clone()),
+            workspaces: Some(self.workspaces),
             graph_style: Some(self.graph_style),
             graph_lines: Some(self.graph_lines),
             mem_graph_lines: Some(self.mem_graph_lines),
+            load_graph_lines: Some(self.load_graph_lines),
             mem_mode: Some(self.mem_mode),
             cpu_mode: Some(self.cpu_mode),
             averages_count: Some(self.averages_count),
@@ -404,6 +494,11 @@ pub fn resolve(cli: &Cli, file: Option<FileConfig>) -> Settings {
         .or(file.mem_graph_lines)
         .unwrap_or(graph_lines)
         .min(MAX_GRAPH_LINES);
+    let load_graph_lines = cli
+        .load_graph_lines
+        .or(file.load_graph_lines)
+        .unwrap_or(graph_lines)
+        .min(MAX_GRAPH_LINES);
 
     // The two modes want different bars: the ASCII one on a tmux status line,
     // unicode blocks in the herdr sidebar.
@@ -443,9 +538,15 @@ pub fn resolve(cli: &Cli, file: Option<FileConfig>) -> Settings {
             .clone()
             .or(file.source)
             .unwrap_or(defaults.source),
+        workspaces: cli
+            .daemon
+            .workspaces
+            .or(file.workspaces)
+            .unwrap_or(defaults.workspaces),
         graph_style,
         graph_lines,
         mem_graph_lines,
+        load_graph_lines,
         mem_mode: cli.mem_mode.or(file.mem_mode).unwrap_or(defaults.mem_mode),
         cpu_mode: cli.cpu_mode.or(file.cpu_mode).unwrap_or(defaults.cpu_mode),
         averages_count: cli
@@ -522,10 +623,12 @@ pub fn write_default_config(path: &Path, force: bool) -> Result<(), ConfigError>
 #[cfg(test)]
 mod tests {
     use super::{
-        load, resolve, write_default_config, FileConfig, Settings, DEFAULT_CONFIG_TEMPLATE,
-        MAX_GRAPH_LINES, MAX_INTERVAL_SECS, MAX_TTL_MS, MIN_TTL_MS,
+        load, resolve, write_default_config, ConfigWatcher, FileConfig, Settings, CONFIG_DIR_ENV,
+        CONFIG_FILE_NAME, DEFAULT_CONFIG_TEMPLATE, DEFAULT_GRAPH_LINES, MAX_GRAPH_LINES,
+        MAX_INTERVAL_SECS, MAX_TTL_MS, MIN_TTL_MS,
     };
     use crate::cli::Cli;
+    use crate::daemon::WorkspaceScope;
     use crate::metrics::memory::MemoryMode;
     use crate::metrics::CpuMode;
     use crate::render::graph::GraphStyle;
@@ -572,6 +675,7 @@ mod tests {
             cpu_mode = 1
             averages_count = 1
             source = "box"
+            workspaces = "focused"
             verbose = true
             graph_style = "vertical"
 
@@ -585,13 +689,15 @@ mod tests {
         let settings = resolve(&parse(&[]), Some(file));
         assert_eq!(settings.interval_secs, 5);
         assert_eq!(settings.graph_lines, 20);
-        // mem_graph_lines follows graph_lines when it is not set itself.
+        // The memory and load bars follow graph_lines when not set themselves.
         assert_eq!(settings.mem_graph_lines, 20);
+        assert_eq!(settings.load_graph_lines, 20);
         assert_eq!(settings.history_len, 20);
         assert_eq!(settings.mem_mode, MemoryMode::UsagePercent);
         assert_eq!(settings.cpu_mode, CpuMode::Threads);
         assert_eq!(settings.averages_count, 1);
         assert_eq!(settings.source, "box");
+        assert_eq!(settings.workspaces, WorkspaceScope::Focused);
         assert!(settings.verbose);
         assert_eq!(settings.graph_style, GraphStyle::Vertical);
         // The ttl still follows the interval it was not given alongside.
@@ -611,6 +717,7 @@ mod tests {
         assert_eq!(settings.interval_secs, 3);
         assert_eq!(settings.graph_lines, 4);
         assert_eq!(settings.mem_graph_lines, 4);
+        assert_eq!(settings.load_graph_lines, 4);
     }
 
     #[test]
@@ -619,20 +726,46 @@ mod tests {
         assert_eq!(settings.graph_lines, 12);
         assert_eq!(settings.mem_graph_lines, 4);
         assert_eq!(settings.token_options().mem_graph_lines, 4);
+        // The load bar was not mentioned, so it follows graph_lines.
+        assert_eq!(settings.load_graph_lines, 12);
+    }
+
+    #[test]
+    fn the_load_bar_can_be_set_on_its_own() {
+        let settings = resolve(&parse(&["-g", "12", "--load-graph-lines", "4"]), None);
+        assert_eq!(settings.graph_lines, 12);
+        assert_eq!(settings.load_graph_lines, 4);
+        assert_eq!(settings.token_options().load_graph_lines, 4);
+        // The memory bar was not mentioned, so it follows graph_lines.
+        assert_eq!(settings.mem_graph_lines, 12);
+    }
+
+    #[test]
+    fn each_bar_can_be_a_different_width() {
+        let file: FileConfig =
+            toml::from_str("graph_lines = 10\nmem_graph_lines = 4\nload_graph_lines = 6\n")
+                .expect("the file parses");
+        let settings = resolve(&parse(&[]), Some(file));
+        assert_eq!(settings.graph_lines, 10);
+        assert_eq!(settings.mem_graph_lines, 4);
+        assert_eq!(settings.load_graph_lines, 6);
     }
 
     #[test]
     fn a_file_cannot_escape_the_ranges_the_command_line_enforces() {
         // clap range checks the command line; nothing range checks a file, so
         // `resolve` has to.
-        let high: FileConfig =
-            toml::from_str("interval_secs = 100000\nttl_ms = 999999999\ngraph_lines = 400\n")
-                .expect("the file parses");
+        let high: FileConfig = toml::from_str(
+            "interval_secs = 100000\nttl_ms = 999999999\ngraph_lines = 400\n\
+             mem_graph_lines = 400\nload_graph_lines = 400\n",
+        )
+        .expect("the file parses");
         let settings = resolve(&parse(&[]), Some(high));
         assert_eq!(settings.interval_secs, MAX_INTERVAL_SECS);
         assert_eq!(settings.ttl_ms, MAX_TTL_MS);
         assert_eq!(settings.graph_lines, MAX_GRAPH_LINES);
         assert_eq!(settings.mem_graph_lines, MAX_GRAPH_LINES);
+        assert_eq!(settings.load_graph_lines, MAX_GRAPH_LINES);
 
         let low: FileConfig =
             toml::from_str("interval_secs = 0\nttl_ms = 0\n").expect("the file parses");
@@ -684,6 +817,139 @@ mod tests {
         let config: FileConfig =
             toml::from_str(DEFAULT_CONFIG_TEMPLATE).expect("the template is valid TOML");
         assert_eq!(config, FileConfig::default());
+    }
+
+    #[test]
+    fn the_watcher_reports_an_edit_and_then_stays_quiet() {
+        let path = temp_path("watcher-edit.toml");
+        std::fs::write(&path, "graph_lines = 4\n").expect("write");
+        let cli = parse(&["--config", path.to_str().expect("utf-8 path")]);
+        let mut watcher = ConfigWatcher::new(&cli);
+
+        assert_eq!(watcher.path(), Some(path.as_path()));
+        // The file as it stood at startup is not an edit.
+        assert_eq!(watcher.poll(), None);
+
+        // A different length as well as a different mtime, so the change is
+        // seen even on a filesystem with a coarse timestamp.
+        std::fs::write(&path, "graph_lines = 40\n").expect("rewrite");
+        let reloaded = watcher.poll().expect("the edit is picked up");
+        assert_eq!(reloaded.graph_lines, 40);
+        assert_eq!(reloaded.mem_graph_lines, 40);
+        // Reading it once is enough.
+        assert_eq!(watcher.poll(), None);
+
+        std::fs::remove_file(&path).ok();
+    }
+
+    #[test]
+    fn the_command_line_still_wins_after_a_reload() {
+        let path = temp_path("watcher-precedence.toml");
+        std::fs::write(&path, "graph_lines = 4\n").expect("write");
+        let cli = parse(&["--config", path.to_str().expect("utf-8 path"), "-g", "12"]);
+        let mut watcher = ConfigWatcher::new(&cli);
+
+        std::fs::write(&path, "graph_lines = 40\ninterval_secs = 5\n").expect("rewrite");
+        let reloaded = watcher.poll().expect("the edit is picked up");
+        // A file cannot take away a flag the user passed.
+        assert_eq!(reloaded.graph_lines, 12);
+        // A key the command line said nothing about still lands.
+        assert_eq!(reloaded.interval_secs, 5);
+
+        std::fs::remove_file(&path).ok();
+    }
+
+    #[test]
+    fn a_malformed_edit_leaves_the_caller_on_the_settings_it_has() {
+        let path = temp_path("watcher-malformed.toml");
+        std::fs::write(&path, "graph_lines = 4\n").expect("write");
+        let cli = parse(&["--config", path.to_str().expect("utf-8 path")]);
+        let mut watcher = ConfigWatcher::new(&cli);
+
+        // A file caught mid-save, or simply mistyped.
+        std::fs::write(&path, "graph_lines = \n").expect("rewrite");
+        assert_eq!(watcher.poll(), None, "a broken file is not a reload");
+        // And it is not read again until it changes.
+        assert_eq!(watcher.poll(), None);
+
+        // The next edit that parses is picked up as usual.
+        std::fs::write(&path, "graph_lines = 40\n").expect("rewrite");
+        assert_eq!(
+            watcher.poll().expect("the fixed file reloads").graph_lines,
+            40
+        );
+
+        std::fs::remove_file(&path).ok();
+    }
+
+    #[test]
+    fn deleting_the_file_falls_back_to_the_defaults() {
+        let path = temp_path("watcher-deleted.toml");
+        std::fs::write(&path, "graph_lines = 40\n").expect("write");
+        let cli = parse(&["--config", path.to_str().expect("utf-8 path")]);
+        let mut watcher = ConfigWatcher::new(&cli);
+
+        std::fs::remove_file(&path).expect("remove");
+        let reloaded = watcher.poll().expect("a removal is a change");
+        assert_eq!(reloaded.graph_lines, DEFAULT_GRAPH_LINES);
+        assert_eq!(reloaded, Settings::default());
+        assert_eq!(watcher.poll(), None);
+
+        // And it comes back when the file does.
+        std::fs::write(&path, "graph_lines = 40\n").expect("rewrite");
+        assert_eq!(
+            watcher.poll().expect("a new file is a change").graph_lines,
+            40
+        );
+
+        std::fs::remove_file(&path).ok();
+    }
+
+    #[test]
+    fn without_config_the_watcher_follows_the_plugin_directory_or_nothing() {
+        // Setting an environment variable is not safe to do from a test, so
+        // this asserts against whichever environment the tests are run in:
+        // outside herdr there is no file to watch and the watcher is inert,
+        // and under herdr it watches the plugin's own config.toml.
+        let cli = parse(&[]);
+        let mut watcher = ConfigWatcher::new(&cli);
+
+        match std::env::var_os(CONFIG_DIR_ENV).filter(|dir| !dir.is_empty()) {
+            None => {
+                assert_eq!(watcher.path(), None, "there is no file to watch");
+                // An inert watcher never reconfigures anything, however often
+                // the daemon asks it.
+                assert_eq!(watcher.poll(), None);
+                assert_eq!(watcher.poll(), None);
+            }
+            Some(dir) => assert_eq!(
+                watcher.path(),
+                Some(PathBuf::from(dir).join(CONFIG_FILE_NAME).as_path())
+            ),
+        }
+    }
+
+    #[test]
+    fn the_template_documents_every_key_a_file_may_set() {
+        // Two keys have already been added to `FileConfig` without the
+        // template following; this is what notices the third.
+        let printed = Settings::default()
+            .to_toml()
+            .expect("the defaults serialise");
+
+        for line in printed.lines() {
+            let line = line.trim();
+            if line.is_empty() {
+                continue;
+            }
+            let key = line.split(" = ").next().unwrap_or(line);
+            assert!(
+                DEFAULT_CONFIG_TEMPLATE
+                    .lines()
+                    .any(|documented| documented.trim_start_matches('#').starts_with(key)),
+                "`{key}` is settable but the template never mentions it"
+            );
+        }
     }
 
     #[test]

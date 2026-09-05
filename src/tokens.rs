@@ -184,6 +184,10 @@ pub struct TokenOptions {
     /// Cells in the memory bar. Memory moves far less than the CPU does, so a
     /// sidebar often wants a shorter bar for it.
     pub mem_graph_lines: usize,
+    /// Cells in the load bar, which is the one minute load per core clamped to
+    /// one saturated machine. Load is the coarsest of the three readings, so
+    /// it is the one most often given a bar of its own.
+    pub load_graph_lines: usize,
     pub mem_mode: MemoryMode,
     pub cpu_mode: CpuMode,
     pub averages_count: u8,
@@ -196,6 +200,7 @@ impl Default for TokenOptions {
             graph_style: GraphStyle::Blocks,
             graph_lines: 10,
             mem_graph_lines: 10,
+            load_graph_lines: 10,
             mem_mode: MemoryMode::Default,
             cpu_mode: CpuMode::Default,
             averages_count: 3,
@@ -205,7 +210,7 @@ impl Default for TokenOptions {
 }
 
 impl TokenOptions {
-    /// These options with both bar widths narrowed until every token fits
+    /// These options with every bar width narrowed until each token fits
     /// inside [`MAX_TOKEN_VALUE_CHARS`].
     ///
     /// Something has to give when a wide bar and a long reading do not both
@@ -214,8 +219,9 @@ impl TokenOptions {
     /// graph that is approximate anyway. `sys_status` is the binding
     /// constraint: it carries all three segments and the bar at once.
     ///
-    /// One budget is applied to both bars rather than one each, so the CPU,
-    /// memory, and load rows still line up under each other in the sidebar.
+    /// One budget is applied to all three bars rather than one each, so the
+    /// CPU, memory, and load rows still line up under each other in the
+    /// sidebar.
     /// [`GraphStyle::Vertical`] is one character wide whatever `graph_lines`
     /// says, so there is nothing to narrow for it.
     #[must_use]
@@ -244,6 +250,7 @@ impl TokenOptions {
         Self {
             graph_lines: self.graph_lines.min(cells),
             mem_graph_lines: self.mem_graph_lines.min(cells),
+            load_graph_lines: self.load_graph_lines.min(cells),
             ..self
         }
     }
@@ -295,6 +302,20 @@ impl TokenSet {
     #[must_use]
     pub fn mentioned_keys(&self) -> usize {
         self.set.len() + self.clear.len()
+    }
+
+    /// Every key this report mentions, set or cleared.
+    ///
+    /// A tick mentions all of them, so this is the whole vocabulary the daemon
+    /// publishes: what a report has to clear to leave a workspace as it found
+    /// it.
+    #[must_use]
+    pub fn keys(&self) -> Vec<String> {
+        self.set
+            .iter()
+            .map(|(key, _)| key.clone())
+            .chain(self.clear.iter().cloned())
+            .collect()
     }
 
     /// The value of `key`, if this report sets one.
@@ -408,7 +429,7 @@ pub fn build_tokens(
             render_bar(
                 opts.graph_style,
                 (load * 100.0).min(100.0) as f32,
-                opts.graph_lines
+                opts.load_graph_lines
             ),
             load_reading.trim()
         )
@@ -467,7 +488,22 @@ mod tests {
     };
     use crate::metrics::{CpuMode, LoadAverages, MemoryStatus, Sample};
     use crate::render::format::{load_text, mem_text};
-    use crate::render::graph::{sparkline, GraphStyle};
+    use crate::render::graph::{block_bar, sparkline, GraphStyle};
+
+    /// The number of cells in the framed bar a token value opens with.
+    ///
+    /// The closing frame character doubles as the one-eighth block, so the bar
+    /// ends at the last one in the value rather than the first; the reading
+    /// that follows the bar never contains it.
+    fn bar_cells(value: &str) -> usize {
+        let inner = value
+            .strip_prefix('\u{2595}')
+            .unwrap_or_else(|| panic!("{value} does not open with a frame"));
+        let end = inner
+            .rfind('\u{258f}')
+            .unwrap_or_else(|| panic!("{value} has no closing frame"));
+        inner[..end].chars().count()
+    }
 
     fn sample(cpu_percent: f32) -> Sample {
         Sample {
@@ -590,6 +626,50 @@ mod tests {
     }
 
     #[test]
+    fn the_load_bar_can_be_narrower_than_the_cpu_bar() {
+        let opts = TokenOptions {
+            graph_lines: 10,
+            load_graph_lines: 4,
+            ..TokenOptions::default()
+        };
+        let tokens = build_tokens(&sample(51.2), &[], &opts, &mut LevelTracker::new());
+
+        let load = tokens.value("load_status").expect("load_status is set");
+        let cpu = tokens.value("cpu_status").expect("cpu_status is set");
+        // A load of 2.11 over eight cores is 26.4% of a saturated machine,
+        // drawn across four cells rather than the ten the CPU gets.
+        assert_eq!(load, format!("{} 2.11 2.35 2.44", block_bar(26.375, 4)));
+        assert_eq!(bar_cells(load), 4, "{load}");
+        // The CPU bar still gets all ten, and memory follows it.
+        assert!(
+            cpu.starts_with(
+                "\u{2595}\u{2588}\u{2588}\u{2588}\u{2588}\u{2588}\u{258f}    \u{258f} "
+            ),
+            "{cpu}"
+        );
+        let mem = tokens.value("mem_status").expect("mem_status is set");
+        assert_eq!(bar_cells(mem), 10, "{mem}");
+        // The level token mirrors the same string.
+        assert_eq!(tokens.value("load_ok"), Some(load));
+    }
+
+    #[test]
+    fn the_three_bars_are_independent() {
+        let opts = TokenOptions {
+            graph_lines: 10,
+            mem_graph_lines: 4,
+            load_graph_lines: 6,
+            ..TokenOptions::default()
+        };
+        let tokens = build_tokens(&sample(51.2), &[], &opts, &mut LevelTracker::new());
+
+        for (key, cells) in [("cpu_status", 10), ("mem_status", 4), ("load_status", 6)] {
+            let value = tokens.value(key).unwrap_or_else(|| panic!("{key} is set"));
+            assert_eq!(bar_cells(value), cells, "{key} = {value}");
+        }
+    }
+
+    #[test]
     fn build_tokens_sets_every_status_key() {
         let tokens = build_tokens(
             &sample(51.2),
@@ -694,6 +774,8 @@ mod tests {
             for graph_lines in [0, 10, 40] {
                 let opts = TokenOptions {
                     graph_lines,
+                    mem_graph_lines: graph_lines,
+                    load_graph_lines: graph_lines,
                     averages_count,
                     ..TokenOptions::default()
                 };
@@ -755,6 +837,7 @@ mod tests {
                         let opts = TokenOptions {
                             graph_lines,
                             mem_graph_lines: graph_lines,
+                            load_graph_lines: graph_lines,
                             graph_style,
                             cpu_mode,
                             ..TokenOptions::default()
@@ -774,6 +857,11 @@ mod tests {
                         for key in ["mem_status", "mem_ok", "mem_warn", "mem_hot"] {
                             if let Some(value) = tokens.value(key) {
                                 assert!(value.ends_with(&memory), "{context}: {key} = {value}");
+                            }
+                        }
+                        for key in ["load_status", "load_ok", "load_warn", "load_hot"] {
+                            if let Some(value) = tokens.value(key) {
+                                assert!(value.ends_with(load.trim()), "{context}: {key} = {value}");
                             }
                         }
                         let sys = tokens.value("sys_status").expect("sys_status is set");
