@@ -5,6 +5,11 @@ min_herdr_version = "0.8.0"
 description = "CPU, memory, and load average status for the Space sidebar"
 platforms = ["linux", "macos", "windows"]
 
+# One build command for every platform. The Windows build needs whichever
+# toolchain `cargo` is already configured with — `x86_64-pc-windows-msvc` (the
+# default, requiring the Visual Studio build tools) or `x86_64-pc-windows-gnu`
+# (requiring mingw-w64). Nothing here selects one; `cargo` uses the host
+# default, and both are type-checked in CI.
 [[build]]
 command = ["cargo", "build", "--release", "--locked"]
 

@@ -5,7 +5,12 @@
 
 use std::fs;
 
-use super::{cpu_count_fallback, CpuTimes, LoadAverages, MemoryStatus, SysError};
+use super::unix_common;
+use super::{CpuTimes, MemoryStatus, SysError};
+
+// `getloadavg` and `sysconf(_SC_NPROCESSORS_ONLN)` behave the same here as on
+// macOS, so both backends share one implementation.
+pub(crate) use unix_common::{cpu_count, load_averages};
 
 const PROC_STAT: &str = "/proc/stat";
 const PROC_MEMINFO: &str = "/proc/meminfo";
@@ -114,31 +119,6 @@ pub(crate) fn cpu_times() -> Result<CpuTimes, SysError> {
 
 pub(crate) fn memory_status() -> Result<MemoryStatus, SysError> {
     parse_meminfo(&fs::read_to_string(PROC_MEMINFO)?)
-}
-
-pub(crate) fn load_averages() -> Result<LoadAverages, SysError> {
-    let mut averages = [0.0_f64; 3];
-    // SAFETY: `getloadavg` writes at most `nelem` doubles into the buffer, and
-    // the buffer has room for exactly three.
-    let filled = unsafe { libc::getloadavg(averages.as_mut_ptr(), 3) };
-    if filled < 3 {
-        return Err(SysError::new("getloadavg did not report three averages"));
-    }
-    Ok(LoadAverages {
-        one: averages[0],
-        five: averages[1],
-        fifteen: averages[2],
-    })
-}
-
-pub(crate) fn cpu_count() -> u32 {
-    // SAFETY: `sysconf` is a pure query with no pointer arguments.
-    let online = unsafe { libc::sysconf(libc::_SC_NPROCESSORS_ONLN) };
-    if online > 0 {
-        online as u32
-    } else {
-        cpu_count_fallback()
-    }
 }
 
 #[cfg(test)]

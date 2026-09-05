@@ -13,8 +13,11 @@ use std::path::PathBuf;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use crate::herdr::{HerdrCli, MetadataReport};
+#[cfg(windows)]
+use crate::metrics::load_emulator::LoadEmulator;
 use crate::metrics::{self, cpu::CpuSampler};
 use crate::render::format::status_line;
+use crate::sys;
 use crate::tokens::{build_tokens, TokenOptions, TokenSet};
 
 /// How long the daemon runs before giving up on a herdr that never answers.
@@ -199,6 +202,55 @@ impl Logger {
     }
 }
 
+/// Where the daemon's load averages come from.
+///
+/// Every platform but Windows has a kernel load average, and on those the
+/// daemon does nothing at all. Windows has none, so the daemon runs a
+/// [`LoadEmulator`](crate::metrics::load_emulator::LoadEmulator) over the CPU
+/// percentages it is already measuring and publishes the result for
+/// `sys::load_averages` to report.
+///
+/// Each platform gets exactly the variant it can use, so the Linux and macOS
+/// code path stays a no-op the optimiser deletes.
+#[derive(Clone, Debug)]
+enum LoadSource {
+    /// The kernel keeps the averages; there is nothing to feed.
+    #[cfg(not(windows))]
+    Native,
+    /// The daemon keeps the averages itself.
+    #[cfg(windows)]
+    Emulated(LoadEmulator),
+}
+
+impl LoadSource {
+    /// The source this platform needs.
+    fn detect() -> Self {
+        #[cfg(windows)]
+        {
+            Self::Emulated(LoadEmulator::new())
+        }
+        #[cfg(not(windows))]
+        {
+            Self::Native
+        }
+    }
+
+    /// Fold this tick's reading in, before anything reads the load averages
+    /// back out.
+    fn update(&mut self, busy_cores: f64, dt: Duration) {
+        match self {
+            #[cfg(not(windows))]
+            Self::Native => {
+                let _ = (busy_cores, dt);
+            }
+            #[cfg(windows)]
+            Self::Emulated(emulator) => {
+                sys::publish_emulated_load(emulator.update(busy_cores, dt));
+            }
+        }
+    }
+}
+
 /// Whether one tick should be followed by another.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Flow {
@@ -213,6 +265,10 @@ struct Daemon<'a> {
     cli: HerdrCli,
     sampler: CpuSampler,
     history: History,
+    load: LoadSource,
+    /// When the load source was last fed, so its decay uses the real elapsed
+    /// time rather than the nominal interval.
+    last_load_update: Option<Instant>,
     seq: SeqGenerator<fn() -> u64>,
     failures: u32,
 }
@@ -225,6 +281,8 @@ impl<'a> Daemon<'a> {
             cli: HerdrCli::from_env(),
             sampler: CpuSampler::new(),
             history: History::new(options.history_len),
+            load: LoadSource::detect(),
+            last_load_update: None,
             seq: SeqGenerator::default(),
             failures: 0,
         }
@@ -247,6 +305,8 @@ impl<'a> Daemon<'a> {
                 return Flow::Continue;
             }
         };
+
+        self.feed_load_source(cpu_percent);
 
         let sample = match metrics::collect(cpu_percent) {
             Ok(sample) => sample,
@@ -298,6 +358,20 @@ impl<'a> Daemon<'a> {
             }
         }
         Flow::Continue
+    }
+
+    /// Hand this tick's reading to the load source, measuring the real gap
+    /// since the previous one so a late tick decays by the right amount.
+    fn feed_load_source(&mut self, cpu_percent: f32) {
+        let now = Instant::now();
+        let dt = self
+            .last_load_update
+            .replace(now)
+            .map_or(self.options.interval, |previous| {
+                now.duration_since(previous)
+            });
+        self.load
+            .update(metrics::busy_cores(cpu_percent, sys::cpu_count()), dt);
     }
 
     fn report_for(&self, workspace_id: &str, tokens: &TokenSet, seq: u64) -> MetadataReport {

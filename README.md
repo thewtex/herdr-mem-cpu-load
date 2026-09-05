@@ -39,6 +39,56 @@ cargo build --release
 
 The binary lands at `target/release/herdr-mem-cpu-load`.
 
+## Platforms
+
+Every backend goes straight to the operating system; there is no `sysinfo`-style
+dependency in between.
+
+| Platform | CPU | Memory | Load average |
+| --- | --- | --- | --- |
+| Linux | `/proc/stat` | `/proc/meminfo` | `getloadavg` |
+| macOS | `host_statistics(HOST_CPU_LOAD_INFO)` | `hw.memsize` and `host_statistics64(HOST_VM_INFO64)` | `getloadavg` |
+| Windows | `GetSystemTimes` | `GlobalMemoryStatusEx` | emulated (see below) |
+| FreeBSD, OpenBSD, NetBSD | – | – | – |
+
+macOS counts active plus wired pages as used memory, the same formula
+`tmux-mem-cpu-load` uses. The compressed pool is deliberately left out, so the
+number matches the original rather than Activity Monitor.
+
+### The Windows load average
+
+Windows has no load average, and the original Windows port simply printed
+nothing where the three numbers go. This one emulates them with the same
+exponentially weighted moving average the Linux kernel uses. For each window
+`T` of 60, 300, and 900 seconds, and a gap of `dt` seconds since the previous
+sample:
+
+```
+factor = exp(-dt / T)
+load   = load * factor + busy_cores * (1 - factor)
+```
+
+`busy_cores` is `cpu_percent / 100 * cpu_count` — the same unit a real load
+average is in. The first sample seeds all three windows instead of decaying up
+from zero, so the first reading is useful rather than 0.
+
+The averages therefore only mean something in `--daemon` mode, where the
+emulator accumulates history tick after tick. One-line mode takes a single
+measurement and exits, so it has nothing to decay: it prints the current busy
+core count three times. Expect the three numbers to be identical there.
+
+### The BSDs
+
+FreeBSD, OpenBSD, and NetBSD compile and run, but the sampling functions report
+`unsupported platform` rather than numbers. Contributions are welcome: the
+porting reference is `freebsd/`, `openbsd/`, and `netbsd/` in
+[tmux-mem-cpu-load](https://github.com/thewtex/tmux-mem-cpu-load) — `cpu.cc` and
+`memory.cc` in each. A backend is four functions (`cpu_times`,
+`memory_status`, `load_averages`, `cpu_count`); add `src/sys/<os>.rs`, wire the
+`cfg` arm in `src/sys/mod.rs`, and re-export `load_averages` and `cpu_count`
+from `src/sys/unix_common.rs` if `getloadavg` and `sysconf` do the right thing
+there.
+
 ## Usage
 
 ```sh
