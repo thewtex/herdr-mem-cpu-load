@@ -1,16 +1,19 @@
 //! Command line interface, kept flag-compatible with `tmux-mem-cpu-load` so
 //! existing tmux configurations keep working.
 
+use std::path::PathBuf;
 use std::time::Duration;
 
 use clap::{Args, Parser};
 
+use crate::daemon::{default_ttl_ms, DaemonOptions, DEFAULT_MAX_FAILURES};
 use crate::metrics::cpu::sampling_delay;
 use crate::metrics::memory::MemoryMode;
 use crate::metrics::CpuMode;
 use crate::render::format::RenderOptions;
 use crate::render::graph::GraphStyle;
 use crate::sys::SysError;
+use crate::tokens::{Thresholds, TokenOptions};
 
 /// CPU, memory, and load average monitor for herdr and tmux.
 #[derive(Debug, Parser)]
@@ -64,12 +67,52 @@ pub struct Cli {
     #[arg(short = 'v', long)]
     pub vertical_graph: bool,
 
-    /// CPU graph style: classic, blocks, or vertical.
-    #[arg(long, value_name = "STYLE", default_value = "classic")]
-    pub graph_style: GraphStyle,
+    /// CPU graph style: classic, blocks, or vertical. [default: classic;
+    /// blocks with --daemon]
+    #[arg(long, value_name = "STYLE")]
+    pub graph_style: Option<GraphStyle>,
+
+    #[command(flatten)]
+    pub daemon: DaemonFlags,
 
     #[command(flatten)]
     pub compat: CompatibilityFlags,
+}
+
+/// Flags that only mean something in daemon mode.
+#[derive(Debug, Args)]
+pub struct DaemonFlags {
+    /// Sample on an interval and report Space sidebar tokens to herdr instead
+    /// of printing one line.
+    #[arg(long = "daemon")]
+    pub enabled: bool,
+
+    /// How long herdr keeps the reported tokens, in milliseconds.
+    /// [default: twice the interval plus one second]
+    #[arg(
+        long,
+        value_name = "N",
+        value_parser = clap::value_parser!(u64).range(1..=86_400_000)
+    )]
+    pub ttl_ms: Option<u64>,
+
+    /// The metadata source the tokens are reported under.
+    #[arg(long, value_name = "ID", default_value = "system-monitor")]
+    pub source: String,
+
+    /// How many samples the CPU history sparkline keeps.
+    /// [default: --graph-lines]
+    #[arg(long, value_name = "N")]
+    pub history: Option<usize>,
+
+    /// Append daemon diagnostics to this file. Without it the daemon logs
+    /// into the herdr plugin state directory, or nowhere at all.
+    #[arg(long, value_name = "PATH")]
+    pub log_file: Option<PathBuf>,
+
+    /// Also log every tick's status line, not just errors.
+    #[arg(long)]
+    pub verbose: bool,
 }
 
 /// Flags the original accepts that this port parses but does not act on yet.
@@ -116,13 +159,23 @@ impl Cli {
         sampling_delay(self.interval)
     }
 
-    /// The graph style, honouring the compatibility `-v` flag.
+    /// The graph style for one-line mode, which keeps the original's ASCII
+    /// bar unless asked otherwise.
     #[must_use]
-    pub const fn resolved_graph_style(&self) -> GraphStyle {
+    pub fn resolved_graph_style(&self) -> GraphStyle {
+        self.graph_style_or(GraphStyle::Classic)
+    }
+
+    /// The graph style, honouring the compatibility `-v` flag and falling back
+    /// to `fallback` when `--graph-style` was not given. The two modes have
+    /// different defaults: ASCII on a tmux status line, unicode blocks in the
+    /// herdr sidebar.
+    #[must_use]
+    pub fn graph_style_or(&self, fallback: GraphStyle) -> GraphStyle {
         if self.vertical_graph {
             GraphStyle::Vertical
         } else {
-            self.graph_style
+            self.graph_style.unwrap_or(fallback)
         }
     }
 
@@ -139,6 +192,44 @@ impl Cli {
             graph_style: self.resolved_graph_style(),
             graph_lines: self.graph_lines,
             averages_count: self.averages_count,
+        })
+    }
+
+    /// Translate the shared flags into the daemon's token options.
+    ///
+    /// # Errors
+    ///
+    /// Returns a [`SysError`] when a mode value is out of range.
+    pub fn token_options(&self) -> Result<TokenOptions, SysError> {
+        Ok(TokenOptions {
+            graph_style: self.graph_style_or(GraphStyle::Blocks),
+            graph_lines: self.graph_lines,
+            mem_mode: MemoryMode::try_from(self.mem_mode)?,
+            cpu_mode: CpuMode::try_from(self.cpu_mode)?,
+            averages_count: self.averages_count,
+            thresholds: Thresholds::default(),
+        })
+    }
+
+    /// Everything [`crate::daemon::run`] needs.
+    ///
+    /// # Errors
+    ///
+    /// Returns a [`SysError`] when a mode value is out of range.
+    pub fn daemon_options(&self) -> Result<DaemonOptions, SysError> {
+        let interval = Duration::from_secs(self.interval);
+        Ok(DaemonOptions {
+            interval,
+            ttl_ms: self
+                .daemon
+                .ttl_ms
+                .unwrap_or_else(|| default_ttl_ms(interval)),
+            source: self.daemon.source.clone(),
+            tokens: self.token_options()?,
+            history_len: self.daemon.history.unwrap_or(self.graph_lines),
+            max_failures: DEFAULT_MAX_FAILURES,
+            log: self.daemon.log_file.clone(),
+            verbose: self.daemon.verbose,
         })
     }
 }
@@ -187,6 +278,7 @@ mod tests {
             vec!["-t", "2"],
             vec!["--graph-style", "spiral"],
             vec!["-l", "256"],
+            vec!["--ttl-ms", "0"],
         ] {
             assert!(
                 Cli::try_parse_from(
@@ -196,6 +288,65 @@ mod tests {
                 "expected {args:?} to be rejected"
             );
         }
+    }
+
+    #[test]
+    fn daemon_mode_is_opt_in_and_defaults_to_the_sidebar_look() {
+        let one_line = parse(&[]);
+        assert!(!one_line.daemon.enabled);
+        assert_eq!(one_line.resolved_graph_style(), GraphStyle::Classic);
+
+        let cli = parse(&["--daemon"]);
+        assert!(cli.daemon.enabled);
+        let options = cli.daemon_options().expect("default modes are valid");
+        assert_eq!(options.interval, Duration::from_secs(1));
+        assert_eq!(options.ttl_ms, 3000);
+        assert_eq!(options.source, "system-monitor");
+        assert_eq!(options.history_len, 10);
+        assert!(!options.verbose);
+        assert_eq!(options.log, None);
+        // The sidebar gets the unicode bar even though one-line mode does not.
+        assert_eq!(options.tokens.graph_style, GraphStyle::Blocks);
+    }
+
+    #[test]
+    fn daemon_flags_override_the_defaults() {
+        let cli = parse(&[
+            "--daemon",
+            "--interval",
+            "2",
+            "--ttl-ms",
+            "9000",
+            "--source",
+            "my-monitor",
+            "--history",
+            "24",
+            "--log-file",
+            "/tmp/daemon.log",
+            "--verbose",
+            "--graph-style",
+            "classic",
+        ]);
+        let options = cli.daemon_options().expect("modes are valid");
+
+        assert_eq!(options.interval, Duration::from_secs(2));
+        assert_eq!(options.ttl_ms, 9000);
+        assert_eq!(options.source, "my-monitor");
+        assert_eq!(options.history_len, 24);
+        assert!(options.verbose);
+        assert_eq!(
+            options.log.as_deref(),
+            Some(std::path::Path::new("/tmp/daemon.log"))
+        );
+        assert_eq!(options.tokens.graph_style, GraphStyle::Classic);
+    }
+
+    #[test]
+    fn the_default_ttl_follows_the_interval() {
+        let options = parse(&["--daemon", "--interval", "2"])
+            .daemon_options()
+            .expect("modes are valid");
+        assert_eq!(options.ttl_ms, 5000);
     }
 
     #[test]

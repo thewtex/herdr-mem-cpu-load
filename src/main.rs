@@ -1,6 +1,9 @@
-//! `herdr-mem-cpu-load`: CPU, memory, and load average status line.
+//! `herdr-mem-cpu-load`: CPU, memory, and load average status.
 //!
-//! Phase 01 provides the one-line output of the original `tmux-mem-cpu-load`.
+//! Without `--daemon` it prints the one-line output of the original
+//! `tmux-mem-cpu-load` and exits. With `--daemon` it stays resident, sampling
+//! on an interval and reporting Space sidebar tokens to a running herdr
+//! server.
 
 use std::process::ExitCode;
 
@@ -8,19 +11,26 @@ use clap::Parser;
 
 use herdr_mem_cpu_load::cli::Cli;
 use herdr_mem_cpu_load::sys::SysError;
-use herdr_mem_cpu_load::{metrics, render};
+use herdr_mem_cpu_load::{daemon, metrics, render};
 
 fn main() -> ExitCode {
     let args = Cli::parse();
+    if args.daemon.enabled {
+        return match args.daemon_options() {
+            Ok(options) => {
+                daemon::run(&options);
+                ExitCode::SUCCESS
+            }
+            Err(error) => fail(&error),
+        };
+    }
+
     match run(&args) {
         Ok(line) => {
             println!("{line}");
             ExitCode::SUCCESS
         }
-        Err(error) => {
-            eprintln!("herdr-mem-cpu-load: {error}");
-            ExitCode::FAILURE
-        }
+        Err(error) => fail(&error),
     }
 }
 
@@ -30,4 +40,9 @@ fn run(args: &Cli) -> Result<String, SysError> {
     let cpu_percent = metrics::cpu::cpu_percentage(args.sampling_delay())?;
     let sample = metrics::collect(cpu_percent)?;
     Ok(render::format::status_line(&sample, &options))
+}
+
+fn fail(error: &SysError) -> ExitCode {
+    eprintln!("herdr-mem-cpu-load: {error}");
+    ExitCode::FAILURE
 }

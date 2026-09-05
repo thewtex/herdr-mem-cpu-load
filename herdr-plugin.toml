@@ -7,3 +7,14 @@ platforms = ["linux", "macos", "windows"]
 
 [[build]]
 command = ["cargo", "build", "--release", "--locked"]
+
+# herdr resolves a relative program that contains a path separator against the
+# plugin root, so the release binary can be named directly and no launcher
+# script is needed. The daemon runs until herdr goes away.
+[[startup]]
+command = ["target/release/herdr-mem-cpu-load", "--daemon"]
+platforms = ["linux", "macos"]
+
+[[startup]]
+command = ["target/release/herdr-mem-cpu-load.exe", "--daemon"]
+platforms = ["windows"]
