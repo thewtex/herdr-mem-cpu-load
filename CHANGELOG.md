@@ -58,6 +58,15 @@ together by `scripts/release.sh`; CI fails if they drift.
   cells, since load is the coarsest of the three readings. `history`, the
   `$cpu_history` window, follows `graph_lines` the same way and defaults to
   twenty samples.
+- `--write-sidebar-rows`, run by the manifest's second `[[build]]` step, so
+  installing the plugin lays out `[ui.sidebar.spaces]` in herdr's own
+  `config.toml` and the rows appear without a block being copied out of the
+  README. It fills an empty table only: a sidebar someone has already arranged
+  is left alone, as is a file that cannot be read or does not parse, and every
+  outcome exits 0 so the install is never failed by it. The rest of the file —
+  every other key, comment, and blank line — comes through untouched, and the
+  new text is renamed over the old in one step, following a symlinked
+  `config.toml` to the file it names rather than replacing the link.
 - `--watch`: re-sample every interval and rewrite the line in place, which is
   what the plugin's popup pane runs.
 - Cross-platform CI (format, lint, test, release build, and a smoke run of the

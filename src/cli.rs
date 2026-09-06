@@ -92,6 +92,11 @@ pub struct Cli {
     #[arg(long)]
     pub force: bool,
 
+    /// Add this plugin's rows to `[ui.sidebar.spaces]` in herdr's own
+    /// config.toml, if no layout is set there, and exit.
+    #[arg(long)]
+    pub write_sidebar_rows: bool,
+
     /// Re-sample every interval and reprint the status line in place until
     /// interrupted.
     #[arg(long)]

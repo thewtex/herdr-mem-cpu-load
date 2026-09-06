@@ -24,6 +24,10 @@ clap = { version = "4", features = ["derive"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 toml = "0.8"
+# The seeding of herdr's own config.toml edits a file this plugin does not
+# own, so it goes through toml_edit, which keeps every key, comment, and blank
+# line that was already there. `toml` builds on it, so it costs no new crate.
+toml_edit = "0.22"
 
 # Linux, macOS, and the BSDs all reach the kernel through libc.
 [target.'cfg(unix)'.dependencies]

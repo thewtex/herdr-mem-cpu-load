@@ -10,8 +10,8 @@
 //!   sidebar tokens to a running herdr server;
 //! * `--watch` — reprint the line in place until interrupted, which is what
 //!   the plugin's status popup pane runs;
-//! * `--print-config` and `--write-default-config` — show or seed the
-//!   configuration and exit.
+//! * `--print-config`, `--write-default-config`, and
+//!   `--write-sidebar-rows` — show or seed configuration and exit.
 //!
 //! # The module map
 //!
@@ -37,6 +37,8 @@
 //! * [`config`](herdr_mem_cpu_load::config) — the `config.toml` layer the
 //!   command line is merged over, and the watcher that re-runs the merge for
 //!   a running daemon when the file changes.
+//! * [`sidebar`](herdr_mem_cpu_load::sidebar) — the rows this plugin's tokens
+//!   need, seeded into herdr's own `config.toml` at install time.
 //! * [`watch`](herdr_mem_cpu_load::watch) — the live status line the herdr
 //!   popup pane runs.
 
@@ -48,7 +50,7 @@ use clap::Parser;
 use herdr_mem_cpu_load::cli::Cli;
 use herdr_mem_cpu_load::config::{self, Settings};
 use herdr_mem_cpu_load::sys::SysError;
-use herdr_mem_cpu_load::{daemon, metrics, render, watch};
+use herdr_mem_cpu_load::{daemon, metrics, render, sidebar, watch};
 
 fn main() -> ExitCode {
     let args = Cli::parse();
@@ -57,6 +59,13 @@ fn main() -> ExitCode {
     // there is a configuration file to read.
     if args.write_default_config {
         return write_default_config(&args);
+    }
+
+    // Seeding the sidebar comes next, and for the same reason: it is about
+    // herdr's configuration rather than this plugin's, so it reads none of
+    // its own.
+    if args.write_sidebar_rows {
+        return write_sidebar_rows();
     }
 
     let settings = args.settings();
@@ -121,6 +130,34 @@ fn write_default_config(args: &Cli) -> ExitCode {
         }
         Err(error) => fail(&error),
     }
+}
+
+/// `--write-sidebar-rows`: put this plugin's rows in herdr's `config.toml`
+/// when no layout has claimed `[ui.sidebar.spaces]` yet.
+///
+/// The plugin's install runs this, and an install must not fail over a file
+/// this plugin does not own, so every outcome is a success: a configuration
+/// that cannot be read, does not parse, or is not ours to edit is reported
+/// and left alone, with the rows to add named in the message.
+fn write_sidebar_rows() -> ExitCode {
+    let path = sidebar::config_path();
+    match sidebar::write_rows(&path) {
+        Ok(sidebar::Outcome::Written) => {
+            println!("added the sidebar rows to {}", path.display());
+        }
+        Ok(sidebar::Outcome::AlreadySet) => {
+            println!(
+                "{} already lays out [ui.sidebar.spaces]; leaving it alone",
+                path.display()
+            );
+        }
+        Err(error) => {
+            eprintln!("herdr-mem-cpu-load: {error}");
+            eprintln!("add the rows by hand to keep the sidebar in step:");
+            eprint!("\n[ui.sidebar.spaces]\n{}", sidebar::SPACES_ROWS);
+        }
+    }
+    ExitCode::SUCCESS
 }
 
 fn fail(error: &dyn Display) -> ExitCode {

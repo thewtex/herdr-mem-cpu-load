@@ -13,6 +13,20 @@ platforms = ["linux", "macos", "windows"]
 [[build]]
 command = ["cargo", "build", "--release", "--locked"]
 
+# The tokens the daemon reports only reach the sidebar once
+# `[ui.sidebar.spaces]` names them, and that table is in herdr's own
+# config.toml rather than this plugin's, so the freshly built binary seeds it
+# here — with the two rows herdr shows by default plus one row per metric.
+#
+# It runs after the build because it is the built binary; it touches nothing
+# when a layout is already set; and it exits 0 whatever happens, including a
+# config.toml that cannot be read or does not parse, because a sidebar that
+# has to be arranged by hand is not a reason to fail an install. `herdr plugin
+# install` runs `[[build]]`; `herdr plugin link` does not, so a linked plugin
+# gets the rows from the `write-sidebar-rows` action below.
+[[build]]
+command = ["target/release/herdr-mem-cpu-load", "--write-sidebar-rows"]
+
 # herdr resolves a relative program that contains a path separator against the
 # plugin root, so the release binary can be named directly and no launcher
 # script is needed. The daemon runs until herdr goes away.
@@ -52,6 +66,13 @@ title = "Show system status"
 description = "Print the effective configuration into the plugin log"
 contexts = ["workspace"]
 command = ["target/release/herdr-mem-cpu-load", "--print-config"]
+
+[[actions]]
+id = "write-sidebar-rows"
+title = "Add the system rows to the Space sidebar"
+description = "Lay out [ui.sidebar.spaces] in herdr's config.toml if nothing has yet"
+contexts = ["workspace"]
+command = ["target/release/herdr-mem-cpu-load", "--write-sidebar-rows"]
 
 [[actions]]
 id = "write-config"

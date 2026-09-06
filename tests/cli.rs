@@ -284,6 +284,79 @@ fn print_config_round_trips_through_the_file_format() {
     assert_eq!(config.source.as_deref(), Some("system-monitor"));
 }
 
+#[test]
+fn the_sidebar_rows_are_written_once_and_then_left_alone() {
+    let dir = TempDir::new("sidebar-rows");
+    let config = dir.join("herdr-config.toml");
+    let existing = "# mine\n[theme]\nname = \"mocha\"\n";
+    std::fs::write(&config, existing).expect("the herdr config is written");
+
+    let output = command(&dir)
+        .env("HERDR_CONFIG_PATH", &config)
+        .arg("--write-sidebar-rows")
+        .output()
+        .expect("the binary runs to completion");
+    assert!(output.status.success(), "{}", stderr_of(&output));
+    assert!(
+        stdout_of(&output).contains(&config.display().to_string()),
+        "the path it wrote is named: {}",
+        stdout_of(&output)
+    );
+
+    let written = std::fs::read_to_string(&config).expect("read back");
+    // What was there is still there, with the layout added below it.
+    assert!(written.starts_with("# mine\n"), "{written}");
+    assert!(written.contains("name = \"mocha\""), "{written}");
+    let parsed: toml::Value = toml::from_str(&written).expect("the result is valid TOML");
+    let rows = parsed["ui"]["sidebar"]["spaces"]["rows"]
+        .as_array()
+        .expect("rows is an array");
+    assert_eq!(rows.len(), 5, "{written}");
+
+    // A second run has nothing to do, and says so without touching the file.
+    let again = command(&dir)
+        .env("HERDR_CONFIG_PATH", &config)
+        .arg("--write-sidebar-rows")
+        .output()
+        .expect("the binary runs to completion");
+    assert!(again.status.success(), "{}", stderr_of(&again));
+    assert!(
+        stdout_of(&again).contains("leaving it alone"),
+        "{}",
+        stdout_of(&again)
+    );
+    assert_eq!(
+        std::fs::read_to_string(&config).expect("read back"),
+        written,
+        "the second run rewrote the file"
+    );
+}
+
+#[test]
+fn a_herdr_config_that_does_not_parse_never_fails_the_install() {
+    let dir = TempDir::new("sidebar-rows-broken");
+    let config = dir.join("herdr-config.toml");
+    let broken = "[ui\n";
+    std::fs::write(&config, broken).expect("the herdr config is written");
+
+    let output = command(&dir)
+        .env("HERDR_CONFIG_PATH", &config)
+        .arg("--write-sidebar-rows")
+        .output()
+        .expect("the binary runs to completion");
+
+    // The install step this runs in must survive a file it cannot edit.
+    assert!(output.status.success(), "{}", stderr_of(&output));
+    let stderr = stderr_of(&output);
+    assert!(stderr.contains("[ui.sidebar.spaces]"), "{stderr}");
+    assert!(stderr.contains("$cpu_ok"), "{stderr}");
+    assert_eq!(
+        std::fs::read_to_string(&config).expect("read back"),
+        broken,
+        "a file that does not parse is left alone"
+    );
+}
+
 // ---------------------------------------------------------------------------
 // Daemon mode, against a fake herdr
 // ---------------------------------------------------------------------------

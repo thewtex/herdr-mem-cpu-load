@@ -1,0 +1,15 @@
+# Added by herdr-mem-cpu-load. The first two rows are the layout herdr shows
+# with no configuration at all; the three below them are this plugin's, one
+# per metric, and need its daemon running to have anything to say.
+#
+# A metric names all three of its level tokens because only one of them ever
+# has a value: the daemon sets the level that applies and clears the other
+# two, and herdr drops a token without a value along with its separator. The
+# result is one row that changes colour as the machine heats up.
+rows = [
+  ["state_icon", "workspace"],
+  ["branch", "git_status"],
+  [{ token = "$cpu_ok" }, { token = "$cpu_warn", fg = "#f9e2af" }, { token = "$cpu_hot", fg = "#f38ba8" }],
+  [{ token = "$mem_ok" }, { token = "$mem_warn", fg = "#f9e2af" }, { token = "$mem_hot", fg = "#f38ba8" }],
+  [{ token = "$load_ok" }, { token = "$load_warn", fg = "#f9e2af" }, { token = "$load_hot", fg = "#f38ba8" }],
+]

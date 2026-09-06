@@ -10,6 +10,8 @@
 //! * [`daemon`] — the sampling loop that ties those last two together.
 //! * [`cli`] — the `tmux-mem-cpu-load` compatible command line.
 //! * [`config`] — the `config.toml` layer the command line is merged over.
+//! * [`sidebar`] — seeding the rows this plugin's tokens need into herdr's
+//!   own `config.toml`.
 //! * [`watch`] — the live status line the herdr popup pane runs.
 //!
 //! The `herdr-mem-cpu-load` binary is a thin wrapper over these: without
@@ -22,6 +24,7 @@ pub mod daemon;
 pub mod herdr;
 pub mod metrics;
 pub mod render;
+pub mod sidebar;
 pub mod sys;
 pub mod tokens;
 pub mod watch;

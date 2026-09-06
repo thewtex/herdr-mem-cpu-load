@@ -66,13 +66,22 @@ From GitHub:
 herdr plugin install thewtex/herdr-mem-cpu-load
 ```
 
+Installing builds the binary and then lays out `[ui.sidebar.spaces]` in
+*herdr's* `config.toml` — the [multi-row layout](#multi-row-with-level-colours)
+below — so the rows appear without anything being copied out of this README.
+It only ever fills an empty table: a `config.toml` that already lays the Space
+sidebar out is left exactly as it is, and so is one that cannot be read or does
+not parse. Either way the install carries on, and the rows to paste are printed
+for you.
+
 For local development, link the working tree instead. `plugin link` does not
 run the manifest's build commands, so build the release binary that the startup
-hook points at first:
+hook points at first, and add the rows yourself if you want them:
 
 ```sh
 cargo build --release
 herdr plugin link /path/to/herdr-mem-cpu-load
+herdr-mem-cpu-load --write-sidebar-rows
 herdr plugin list
 ```
 
@@ -95,6 +104,21 @@ cp target/release/herdr-mem-cpu-load ~/.local/bin/
 
 Three recipes for `~/.config/herdr/config.toml`. All three assume the daemon is
 running.
+
+Installing the plugin writes the first of them when nothing has laid the Space
+sidebar out yet. To ask for it later — after a `plugin link`, or once an empty
+`[ui.sidebar.spaces]` has been emptied again — run it by hand, or from the
+Space menu as *Add the system rows to the Space sidebar*:
+
+```sh
+herdr-mem-cpu-load --write-sidebar-rows
+```
+
+It writes into herdr's own `config.toml`, not the plugin's: `$HERDR_CONFIG_PATH`
+if that is set, otherwise `config.toml` in herdr's configuration directory. The
+file keeps every other key, comment, and blank line it had, and a layout that
+is already there is never replaced. herdr picks the change up on its next
+config reload or restart.
 
 ### Multi-row with level colours
 
@@ -146,8 +170,8 @@ rows = [
 ]
 ```
 
-`$cpu_history` keeps `--history` samples, which defaults to `--graph-lines`.
-Raise it for a longer trace:
+`$cpu_history` keeps `--history` samples: twenty by default, or `--graph-lines`
+when that is set. Raise it for a longer trace:
 
 ```toml
 # config.toml in the plugin's config directory
@@ -307,7 +331,7 @@ herdr-mem-cpu-load [OPTIONS]
 | `-i`, `--interval <SECS>` | `1` | Status refresh interval in seconds; also the CPU sampling window. 1 to 3600. |
 | `-g`, `--graph-lines <N>` | `10` | Cells in the CPU graph. `0` hides the graph, `64` is the maximum. |
 | `--mem-graph-lines <N>` | `--graph-lines` | Cells in the memory bar. Daemon mode only; one-line mode draws no memory bar. |
-| `--load-graph-lines <N>` | `--graph-lines` | Cells in the load bar. Daemon mode only; one-line mode draws no load bar. |
+| `--load-graph-lines <N>` | `--graph-lines`, else `4` | Cells in the load bar. Daemon mode only; one-line mode draws no load bar. |
 | `-m`, `--mem-mode <0\|1\|2>` | `0` | `0`: used/total, `1`: free memory, `2`: usage percent. |
 | `-t`, `--cpu-mode <0\|1>` | `0` | `0`: max 100%, `1`: max 100% per thread. |
 | `-a`, `--averages-count <0-3>` | `3` | How many load averages to print. |
@@ -324,11 +348,12 @@ herdr-mem-cpu-load [OPTIONS]
 | `--print-config` | off | Print the effective configuration as TOML and exit. |
 | `--write-default-config` | off | Write a commented `config.toml` and exit. |
 | `--force` | off | Let `--write-default-config` overwrite an existing file. |
+| `--write-sidebar-rows` | off | Lay out `[ui.sidebar.spaces]` in herdr's `config.toml` if nothing has, and exit. |
 | `--daemon` | off | Run as a herdr plugin daemon instead of printing one line. |
 | `--ttl-ms <N>` | `interval × 2 + 1000` | How long herdr keeps the reported tokens. Daemon mode only. |
 | `--source <ID>` | `system-monitor` | Metadata source the tokens are reported under. Daemon mode only. |
 | `--workspaces <all\|focused>` | `focused` | Report to the active workspace alone, or to every open one. Daemon mode only. |
-| `--history <N>` | `--graph-lines` | Samples kept for the `$cpu_history` sparkline. Daemon mode only. |
+| `--history <N>` | `--graph-lines`, else `20` | Samples kept for the `$cpu_history` sparkline. Daemon mode only. |
 | `--log-file <PATH>` | – | Append daemon diagnostics here. Daemon mode only. |
 | `--verbose` | off | Log every tick's status line, not just errors. Daemon mode only. |
 
@@ -456,8 +481,16 @@ there.
 
 ## Troubleshooting
 
-**Nothing appears in the sidebar.** Check that the daemon is running and what
-it said:
+**Nothing appears in the sidebar.** First check that herdr has rows to draw:
+the tokens are reported whether or not anything asks for them, so a
+`[ui.sidebar.spaces]` without them means an install that found the table
+already laid out, or a plugin that was linked rather than installed.
+
+```sh
+herdr-mem-cpu-load --write-sidebar-rows
+```
+
+Otherwise check that the daemon is running and what it said:
 
 ```sh
 herdr plugin log list --plugin thewtex.mem-cpu-load
