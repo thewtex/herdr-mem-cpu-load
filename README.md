@@ -242,11 +242,11 @@ command line over the defaults.
 | `graph_style` | `"classic"`, `"blocks"` with `--daemon` | `"classic"`, `"blocks"`, or `"vertical"`. |
 | `graph_lines` | `10` | Cells in the CPU graph. `0` hides it, `64` is the maximum. |
 | `mem_graph_lines` | `graph_lines` | Cells in the memory bar. |
-| `load_graph_lines` | `graph_lines` | Cells in the load bar, which draws the one minute load per core. |
+| `load_graph_lines` | `graph_lines` if set, else `4` | Cells in the load bar, which draws the one minute load per core. |
 | `mem_mode` | `0` | `0`: used/total, `1`: free memory, `2`: usage percent. |
 | `cpu_mode` | `0` | `0`: max 100%, `1`: max 100% per thread. |
 | `averages_count` | `3` | How many load averages to print, `0` to `3`. |
-| `history` | `graph_lines` | Samples kept for `$cpu_history`. Daemon only. |
+| `history` | `graph_lines` if set, else `20` | Samples kept for `$cpu_history`. Daemon only. |
 | `verbose` | `false` | Log every tick's status line, not just errors. Daemon only. |
 | `thresholds.cpu_warn` | `50.0` | CPU percentage that turns `$cpu_ok` into `$cpu_warn`. |
 | `thresholds.cpu_hot` | `80.0` | CPU percentage that turns it into `$cpu_hot`. |
@@ -265,11 +265,11 @@ workspaces = "focused"
 graph_style = "classic"
 graph_lines = 10
 mem_graph_lines = 10
-load_graph_lines = 10
+load_graph_lines = 4
 mem_mode = 0
 cpu_mode = 0
 averages_count = 3
-history = 10
+history = 20
 verbose = false
 
 [thresholds]
@@ -289,9 +289,12 @@ mem_graph_lines = 4
 load_graph_lines = 4
 ```
 
-Each of the three bars can be a different width; `mem_graph_lines` and
-`load_graph_lines` both fall back to `graph_lines` when they are not set, so
-setting `graph_lines` alone still moves all three together.
+Each of the three bars can be a different width. `mem_graph_lines`,
+`load_graph_lines`, and `history` all fall back to `graph_lines` when it is set
+and they are not, so setting `graph_lines` alone still moves them together.
+With nothing set at all each keeps a default of its own: ten cells for the CPU
+graph and the memory bar, four for the coarser load bar, and twenty samples of
+history, which is one character per sample rather than a bar.
 
 ## One-line mode
 

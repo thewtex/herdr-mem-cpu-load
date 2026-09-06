@@ -53,8 +53,11 @@ together by `scripts/release.sh`; CI fails if they drift.
   `--write-default-config` to drop a commented template.
 - Configurable `[thresholds]` for the level tokens, and `mem_graph_lines` and
   `load_graph_lines` so the memory and load bars can be narrower than the CPU
-  bar. Both fall back to `graph_lines`, so the three still move together
-  unless they are set apart.
+  bar. Both fall back to `graph_lines` when it is set, so the three still move
+  together unless they are set apart; left alone the load bar defaults to four
+  cells, since load is the coarsest of the three readings. `history`, the
+  `$cpu_history` window, follows `graph_lines` the same way and defaults to
+  twenty samples.
 - `--watch`: re-sample every interval and rewrite the line in place, which is
   what the plugin's popup pane runs.
 - Cross-platform CI (format, lint, test, release build, and a smoke run of the

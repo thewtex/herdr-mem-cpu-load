@@ -52,6 +52,16 @@ pub const MIN_TTL_MS: u64 = 1;
 pub const MAX_TTL_MS: u64 = 86_400_000;
 /// The default width of the CPU graph, in cells.
 pub const DEFAULT_GRAPH_LINES: usize = 10;
+/// The default width of the load bar, in cells.
+///
+/// Load is the coarsest of the three readings, so it says what it has to say
+/// in far fewer cells than the CPU graph needs.
+pub const DEFAULT_LOAD_GRAPH_LINES: usize = 4;
+/// The default number of samples kept for the `$cpu_history` sparkline.
+///
+/// The sparkline is one character per sample, so it can hold a longer window
+/// than a bar of the same width would.
+pub const DEFAULT_HISTORY_LEN: usize = 20;
 /// The widest bar the command line accepts.
 ///
 /// A token value is capped at [`crate::tokens::MAX_TOKEN_VALUE_CHARS`]
@@ -359,11 +369,11 @@ impl Default for Settings {
             graph_style: GraphStyle::Classic,
             graph_lines: DEFAULT_GRAPH_LINES,
             mem_graph_lines: DEFAULT_GRAPH_LINES,
-            load_graph_lines: DEFAULT_GRAPH_LINES,
+            load_graph_lines: DEFAULT_LOAD_GRAPH_LINES,
             mem_mode: MemoryMode::Default,
             cpu_mode: CpuMode::Default,
             averages_count: DEFAULT_AVERAGES_COUNT,
-            history_len: DEFAULT_GRAPH_LINES,
+            history_len: DEFAULT_HISTORY_LEN,
             verbose: false,
             thresholds: Thresholds::default(),
             log: None,
@@ -484,11 +494,15 @@ pub fn resolve(cli: &Cli, file: Option<FileConfig>) -> Settings {
         .clamp(1, MAX_INTERVAL_SECS);
     let interval = Duration::from_secs(interval_secs);
 
-    let graph_lines = cli
+    // The memory bar, the load bar, and the history window all follow
+    // graph_lines when it is set and nothing narrower is, so setting the one
+    // key still moves them together. Left alone, each keeps a default of its
+    // own: they are not all best read at the same width.
+    let set_graph_lines = cli
         .graph_lines
         .or(file.graph_lines)
-        .unwrap_or(defaults.graph_lines)
-        .min(MAX_GRAPH_LINES);
+        .map(|lines| lines.min(MAX_GRAPH_LINES));
+    let graph_lines = set_graph_lines.unwrap_or(defaults.graph_lines);
     let mem_graph_lines = cli
         .mem_graph_lines
         .or(file.mem_graph_lines)
@@ -497,7 +511,8 @@ pub fn resolve(cli: &Cli, file: Option<FileConfig>) -> Settings {
     let load_graph_lines = cli
         .load_graph_lines
         .or(file.load_graph_lines)
-        .unwrap_or(graph_lines)
+        .or(set_graph_lines)
+        .unwrap_or(defaults.load_graph_lines)
         .min(MAX_GRAPH_LINES);
 
     // The two modes want different bars: the ASCII one on a tmux status line,
@@ -554,7 +569,12 @@ pub fn resolve(cli: &Cli, file: Option<FileConfig>) -> Settings {
             .or(file.averages_count)
             .unwrap_or(defaults.averages_count)
             .min(3),
-        history_len: cli.daemon.history.or(file.history).unwrap_or(graph_lines),
+        history_len: cli
+            .daemon
+            .history
+            .or(file.history)
+            .or(set_graph_lines)
+            .unwrap_or(defaults.history_len),
         verbose: cli.daemon.verbose || file.verbose.unwrap_or(false),
         thresholds: file
             .thresholds
@@ -624,8 +644,8 @@ pub fn write_default_config(path: &Path, force: bool) -> Result<(), ConfigError>
 mod tests {
     use super::{
         load, resolve, write_default_config, ConfigWatcher, FileConfig, Settings, CONFIG_DIR_ENV,
-        CONFIG_FILE_NAME, DEFAULT_CONFIG_TEMPLATE, DEFAULT_GRAPH_LINES, MAX_GRAPH_LINES,
-        MAX_INTERVAL_SECS, MAX_TTL_MS, MIN_TTL_MS,
+        CONFIG_FILE_NAME, DEFAULT_CONFIG_TEMPLATE, DEFAULT_GRAPH_LINES, DEFAULT_HISTORY_LEN,
+        DEFAULT_LOAD_GRAPH_LINES, MAX_GRAPH_LINES, MAX_INTERVAL_SECS, MAX_TTL_MS, MIN_TTL_MS,
     };
     use crate::cli::Cli;
     use crate::daemon::WorkspaceScope;
@@ -738,6 +758,22 @@ mod tests {
         assert_eq!(settings.token_options().load_graph_lines, 4);
         // The memory bar was not mentioned, so it follows graph_lines.
         assert_eq!(settings.mem_graph_lines, 12);
+    }
+
+    #[test]
+    fn the_load_bar_and_the_history_window_have_defaults_of_their_own() {
+        // Nothing set: each key takes its own default rather than the CPU
+        // graph's ten cells.
+        let settings = resolve(&parse(&[]), None);
+        assert_eq!(settings.graph_lines, DEFAULT_GRAPH_LINES);
+        assert_eq!(settings.mem_graph_lines, DEFAULT_GRAPH_LINES);
+        assert_eq!(settings.load_graph_lines, DEFAULT_LOAD_GRAPH_LINES);
+        assert_eq!(settings.history_len, DEFAULT_HISTORY_LEN);
+
+        // graph_lines set and nothing narrower: they follow it again.
+        let settings = resolve(&parse(&["-g", "8"]), None);
+        assert_eq!(settings.load_graph_lines, 8);
+        assert_eq!(settings.history_len, 8);
     }
 
     #[test]

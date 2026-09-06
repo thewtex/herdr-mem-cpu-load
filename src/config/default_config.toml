@@ -57,9 +57,10 @@
 #mem_graph_lines = 10
 
 # Cells in the load bar, which draws the one minute load per core clamped to
-# one saturated machine. Defaults to graph_lines. Daemon mode only: the
-# one-line format prints the load averages without a bar.
-#load_graph_lines = 10
+# one saturated machine. Follows graph_lines when that is set and this is not.
+# Daemon mode only: the one-line format prints the load averages without a
+# bar.
+#load_graph_lines = 4
 
 # Memory display. 0: used/total, 1: free memory, 2: usage percent.
 #mem_mode = 0
@@ -70,9 +71,10 @@
 # How many load averages to print, 0 to 3.
 #averages_count = 3
 
-# Samples kept for the $cpu_history sparkline. Defaults to graph_lines.
-# Daemon mode only.
-#history = 10
+# Samples kept for the $cpu_history sparkline. Follows graph_lines when that
+# is set and this is not. The sparkline is one character per sample, so it
+# holds a longer window than a bar of the same width. Daemon mode only.
+#history = 20
 
 # Log every tick's status line to the daemon log, not just errors.
 # Daemon mode only.

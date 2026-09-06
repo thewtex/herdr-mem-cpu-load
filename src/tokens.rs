@@ -200,7 +200,7 @@ impl Default for TokenOptions {
             graph_style: GraphStyle::Blocks,
             graph_lines: 10,
             mem_graph_lines: 10,
-            load_graph_lines: 10,
+            load_graph_lines: 4,
             mem_mode: MemoryMode::Default,
             cpu_mode: CpuMode::Default,
             averages_count: 3,
@@ -688,7 +688,8 @@ mod tests {
         );
         assert_eq!(
             tokens.value("load_status"),
-            Some("\u{2595}\u{2588}\u{2588}\u{258b}       \u{258f} 2.11 2.35 2.44")
+            // The load bar defaults to four cells, not the CPU graph's ten.
+            Some("\u{2595}\u{2588}   \u{258f} 2.11 2.35 2.44")
         );
         assert!(tokens
             .value("sys_status")

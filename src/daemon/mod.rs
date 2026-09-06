@@ -108,7 +108,7 @@ impl Default for DaemonOptions {
             source: "system-monitor".to_string(),
             workspaces: WorkspaceScope::Focused,
             tokens: TokenOptions::default(),
-            history_len: TokenOptions::default().graph_lines,
+            history_len: crate::config::DEFAULT_HISTORY_LEN,
             max_failures: DEFAULT_MAX_FAILURES,
             log: None,
             verbose: false,
@@ -955,7 +955,7 @@ mod tests {
         assert_eq!(default_ttl_ms(Duration::from_secs(1)), 3000);
         assert_eq!(DaemonOptions::default().ttl_ms, 5000);
         assert_eq!(DaemonOptions::default().source, "system-monitor");
-        assert_eq!(DaemonOptions::default().history_len, 10);
+        assert_eq!(DaemonOptions::default().history_len, 20);
     }
 
     #[test]

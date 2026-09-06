@@ -43,7 +43,8 @@ pub struct Cli {
     #[arg(long, value_name = "N", value_parser = parse_graph_lines)]
     pub mem_graph_lines: Option<usize>,
 
-    /// How many cells the load bar is drawn with. [default: --graph-lines]
+    /// How many cells the load bar is drawn with. [default: --graph-lines
+    /// when it is given, otherwise 4]
     #[arg(long, value_name = "N", value_parser = parse_graph_lines)]
     pub load_graph_lines: Option<usize>,
 
@@ -136,7 +137,7 @@ pub struct DaemonFlags {
     pub workspaces: Option<WorkspaceScope>,
 
     /// How many samples the CPU history sparkline keeps.
-    /// [default: --graph-lines]
+    /// [default: --graph-lines when it is given, otherwise 20]
     #[arg(long, value_name = "N")]
     pub history: Option<usize>,
 
@@ -337,7 +338,7 @@ mod tests {
         assert_eq!(options.source, "system-monitor");
         // The rows follow the focus unless a sidebar asks for them everywhere.
         assert_eq!(options.workspaces, WorkspaceScope::Focused);
-        assert_eq!(options.history_len, 10);
+        assert_eq!(options.history_len, 20);
         assert!(!options.verbose);
         assert_eq!(options.log, None);
         // The sidebar gets the unicode bar even though one-line mode does not.
