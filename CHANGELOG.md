@@ -9,6 +9,8 @@ together by `scripts/release.sh`; CI fails if they drift.
 
 ## [Unreleased]
 
+## [0.1.2] - 2026-09-07
+
 ## [0.1.1] - 2026-09-07
 
 ### Added

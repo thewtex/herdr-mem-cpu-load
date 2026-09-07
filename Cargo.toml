@@ -1,6 +1,6 @@
 [package]
 name = "herdr-mem-cpu-load"
-version = "0.1.1"
+version = "0.1.2"
 edition = "2021"
 rust-version = "1.85"
 description = "CPU, memory, and load average monitor plugin for herdr, re-imagined from tmux-mem-cpu-load"
