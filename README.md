@@ -564,34 +564,6 @@ file when it changes, so an edit lands within one interval and no restart is
 needed; `configuration reloaded: ...` in the daemon log is the confirmation.
 One-line and `--watch` mode read the file once, when they start.
 
-## Publishing to the herdr marketplace
-
-The [marketplace](https://herdr.dev/plugins/) indexes public GitHub
-repositories automatically; nothing is submitted and nothing is reviewed. A
-repository is listed when both of these are true:
-
-1. it carries the GitHub topic `herdr-plugin`, and
-2. its default branch contains at least one `herdr-plugin.toml` whose required
-   metadata parses — `id`, `name`, `version`, and `min_herdr_version`.
-
-This repository keeps its manifest at the root, which is also where
-`herdr plugin install thewtex/herdr-mem-cpu-load` looks. Manifests in
-subdirectories are indexed too, and each one is listed as a separately
-installable plugin under a single repository card.
-
-The index refreshes every 30 minutes and rescans a repository when its
-default-branch head moves, so a release shows up on its own. Forks, archived
-repositories, and repositories whose manifest metadata is malformed are
-excluded — which is why `scripts/check_manifest.py` runs in CI, and why
-`scripts/release.sh` is the only supported way to bump a version: a manifest
-that stops parsing, or a `version` that has drifted from `Cargo.toml`, silently
-drops the plugin off the listing.
-
-A card shows the repository name, description, star count, primary language,
-and last push, plus each manifest's `name` and `version`. See herdr's
-[marketplace documentation](https://herdr.dev/docs/marketplace/) for the full
-rules.
-
 ## Contributing
 
 Build, test, cross-target checks, how to run this against a live herdr, and the
