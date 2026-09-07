@@ -9,6 +9,8 @@ together by `scripts/release.sh`; CI fails if they drift.
 
 ## [Unreleased]
 
+## [0.1.1] - 2026-09-07
+
 ### Added
 
 - One-line status output ported from `tmux-mem-cpu-load`: memory, a CPU bar
